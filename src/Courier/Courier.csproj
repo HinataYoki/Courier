@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>default</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>Courier</AssemblyName>
+    <RootNamespace>Courier</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    内部类型（CourierJson / CourierIO / CourierProtocol / CourierCommand ...）只对同仓库的
+    测试可见。这是为了不把内部实现提到 public 面上来，也不为测试便利扩大 public 面。
+    不影响"单一编译单元"：源码本身仍然是可整体拖进宿主的一组文件。
+
+    CLI 不走 InternalsVisibleTo：它用 <Compile Include> 直接链接同一批源文件，
+    原因见 src/Courier.Cli/Courier.Cli.csproj 的注释。
+  -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Courier.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    tools/ 不是产品代码：不受零依赖与体积预算约束，也不被 src/ 引用。
+    这里仍然零第三方包，因为端到端验证要证明的正是"产品库自己就能跑通两个真实进程"。
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>default</LangVersion>
+    <AssemblyName>Courier.E2E</AssemblyName>
+    <PackageId>Courier.E2E</PackageId>
+    <RootNamespace>Courier.E2E</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Courier\Courier.csproj" />
+  </ItemGroup>
+
+</Project>

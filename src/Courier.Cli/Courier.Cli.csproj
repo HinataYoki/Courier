@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>default</LangVersion>
+    <AssemblyName>courier</AssemblyName>
+    <!--
+      PackageId 与 AssemblyName 分离：NuGet 还原时以 PackageId（默认取 AssemblyName）区分工程，
+      而 AssemblyName 又必须是 courier。两者同名会让还原报 "Ambiguous project name 'courier'"，
+      因此这里显式给一个不会与产品库冲突的包名。
+    -->
+    <PackageId>Courier.Cli</PackageId>
+    <RootNamespace>Courier.Cli</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <!--
+    依赖方向只有 Cli -> Courier。CLI 复用产品库的协议实现：
+    CourierDispatcher 做投递前置检查，CourierEndpointReader / CourierClaim / CourierResponse
+    做只读解析，CourierJsonObject 做序列化。CLI 自己不复写任何协议逻辑。
+
+    为什么是 Compile Include 而不是 ProjectReference：
+    产品库程序集名是 Courier，CLI 程序集名必须是 courier（可执行文件名，也是原设计里
+    InternalsVisibleTo("courier") 的前提）。Windows 文件系统与 .NET 程序集加载都按大小写
+    不敏感匹配简单名，两个只差大小写的程序集无法在同一加载上下文共存：ProjectReference
+    复制 Courier.dll 时会被 CLI 自己的 courier.dll 覆盖，运行期抛
+    "Could not load type 'Courier.Xxx' from assembly 'courier'"（已用最小工程复现，
+    换到 libs/ 子目录 + 改 deps.json 同样失败）。把产品源码按单一编译单元约定允许的
+    <Compile Include ... Link ... /> 链接进来，物理位置仍然只有 src/Courier/ 一处、
+    没有复制任何实现，也避免为了改名去动 src/Courier/（CLI 作者无权改产品代码）。
+  -->
+  <ItemGroup>
+    <Compile Include="..\Courier\*.cs" Link="Courier\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

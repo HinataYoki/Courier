@@ -1,0 +1,31 @@
+# 构建产物
+bin/
+obj/
+artifacts/
+
+# IDE / 编辑器
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.swp
+*~
+
+# 测试与运行时临时目录
+TestResults/
+*.trx
+*.coverage
+.courier/
+.tmp-*/
+*.tmp
+*.bak
+
+# 日志与临时输出
+*.log
+bench-out.txt
+
+# 操作系统垃圾文件
+.DS_Store
+Thumbs.db
+desktop.ini
