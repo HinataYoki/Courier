@@ -28,12 +28,14 @@ namespace Courier.Cli
                     items.Add(new CourierJsonObject()
                         .AddString("endpointId", endpoint.EndpointId)
                         .AddString("description", endpoint.Description)
+                        .AddString("sessionId", endpoint.SessionId)
                         .AddNumber("processId", endpoint.ProcessId)
                         .AddString("startedAtUtc", CourierProtocol.FormatUtc(endpoint.StartedAtUtc))
                         .AddNumber("protocolVersion", endpoint.ProtocolVersion)
                         .AddString("state", endpoint.State)
                         .AddRaw("heartbeatAgeMs", endpoint.HeartbeatAgeMs == null ? "null" : CliJson.Number(endpoint.HeartbeatAgeMs.Value))
                         .AddRaw("actions", CliJson.Actions(endpoint.Actions))
+                        .AddRaw("states", CliJson.States(endpoint.States))
                         .Build());
                 }
 

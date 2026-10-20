@@ -70,6 +70,8 @@ namespace Courier.Cli
                     return WithRoot(arguments, 2, "<endpointId> and <channel>/<action>", CliCallCommand.Run);
                 case "ps":
                     return WithRoot(arguments, 0, "no arguments", CliPsCommand.Run);
+                case "state":
+                    return WithRoot(arguments, 2, "<endpointId> and <name>", CliStateCommand.Run);
                 case "":
                     CliUsage.Write(Console.Error);
                     return CliExitCode.Failed;

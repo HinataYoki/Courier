@@ -8,7 +8,7 @@ using Xunit;
 namespace Courier.Tests;
 
 /// <summary>
-/// 原子写与幂等（SPEC §3.3 与 §13）。
+/// 原子写与幂等（SPEC §3.3 与 §16）。
 /// </summary>
 public sealed class CourierAtomicityTests : TestRoot
 {
@@ -187,7 +187,7 @@ public sealed class CourierAtomicityTests : TestRoot
         Assert.Equal("{\"v\":1}", ReadText(path));
     }
 
-    /// <summary>SPEC §13：同一条命令无论 Tick 多少次都只执行一次，只产生一个终态证据。</summary>
+    /// <summary>SPEC §16：同一条命令无论 Tick 多少次都只执行一次，只产生一个终态证据。</summary>
     [Fact]
     public void Tick_同一命令重复Tick_只执行一次且只产生一个终态()
     {
@@ -201,7 +201,7 @@ public sealed class CourierAtomicityTests : TestRoot
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
 
-        // 反复驱动泵：无论 Tick 多少轮，同一条命令只被启动一次、只产生一个终态（SPEC §13.1）。
+        // 反复驱动泵：无论 Tick 多少轮，同一条命令只被启动一次、只产生一个终态（SPEC §16.1）。
         node.WaitForIdle(TimeSpan.FromSeconds(5));
         node.Tick();
         node.Tick();

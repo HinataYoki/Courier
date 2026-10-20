@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace Courier.Cli
 {
     /// <summary>
-    /// `courier ps`：列出所有端点 claims/ 里正在处理的请求（SPEC §8）。
+    /// `courier ps`：列出所有端点 claims/ 里正在处理的请求（SPEC §10）。
     /// <para>
     /// 这条命令回答"现在卡在哪条命令上"，只读 claims/，不需要新字段、不需要端点配合。
     /// </para>
@@ -50,7 +50,7 @@ namespace Courier.Cli
             {
                 CliClaimRecord claim = claims[index];
                 long remaining = CliDirectory.LeaseRemainingMs(claim.Claim.ExpiresAtUtc, now);
-                // SPEC §8.1：claim 是租约。显示"还剩多久"比"认领了多久"更有用——
+                // SPEC §10.1：claim 是租约。显示"还剩多久"比"认领了多久"更有用——
                 // 剩下为 0 就说明持有者已经失联，下一个 Tick 就会接管。
                 CliOutput.WriteLine(
                     claim.EndpointId + "  " + claim.RequestId

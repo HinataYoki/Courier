@@ -1,7 +1,7 @@
 namespace Courier.Cli
 {
     /// <summary>
-    /// `courier ps` 的一行：某个端点 claims/ 下的一条认领记录（SPEC §8）。
+    /// `courier ps` 的一行：某个端点 claims/ 下的一条认领记录（SPEC §10）。
     /// 单独成类型是为了让排序与输出共用同一份数据，而不是各自再扫一次目录。
     /// </summary>
     internal sealed class CliClaimRecord

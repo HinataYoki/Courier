@@ -8,7 +8,7 @@ using Xunit;
 namespace Courier.Tests;
 
 /// <summary>
-/// 服务者循环是**非阻塞泵**（SPEC §13.1）：Tick 只启动与收割，不等 handler。
+/// 服务者循环是**非阻塞泵**（SPEC §16.1）：Tick 只启动与收割，不等 handler。
 /// 这一组用例锁死泵的四条外部可观察行为——心跳不被 handler 拖死、取消能到达在途 handler、
 /// 租约在长任务里持续续约、超时立即判负而不等 handler 返回。
 /// </summary>
@@ -56,7 +56,7 @@ public sealed class CourierPumpTests : TestRoot
     }
 
     /// <summary>
-    /// SPEC §13.2 第 4 条：handler 超过 HANDLER_TIMEOUT（默认=命令剩余 deadline）时 MUST 立即写
+    /// SPEC §16.2 第 4 条：handler 超过 HANDLER_TIMEOUT（默认=命令剩余 deadline）时 MUST 立即写
     /// failed/handler-timeout，MUST NOT 等它返回——一个不响应取消的 handler 可能永远不返回。
     /// </summary>
     [Fact]
@@ -98,7 +98,7 @@ public sealed class CourierPumpTests : TestRoot
     }
 
     /// <summary>
-    /// SPEC §8.1：租约是租约，不是「认领时刻 + 固定窗口」。长任务执行期间 MUST 续约，
+    /// SPEC §10.1：租约是租约，不是「认领时刻 + 固定窗口」。长任务执行期间 MUST 续约，
     /// 否则一个正常的慢 handler 会把自己的命令判成「持有者已死」而被别人接管。
     /// </summary>
     [Fact]

@@ -6,11 +6,11 @@ using Xunit;
 namespace Courier.Tests;
 
 /// <summary>
-/// 崩溃恢复（SPEC §8、§10、§13 的 Process 分支）。
+/// 崩溃恢复（SPEC §10、§12、§16 的 Process 分支）。
 /// </summary>
 public sealed class CourierRecoveryTests : TestRoot
 {
-    /// <summary>SPEC §8：claim 未过期说明别处正在处理，本轮跳过且不得触碰 claim。</summary>
+    /// <summary>SPEC §10：claim 未过期说明别处正在处理，本轮跳过且不得触碰 claim。</summary>
     [Fact]
     public void Tick_claim未过期_不执行且保留claim()
     {
@@ -35,7 +35,7 @@ public sealed class CourierRecoveryTests : TestRoot
         Assert.True(File.Exists(CommandsPath("worker", requestId)));
     }
 
-    /// <summary>SPEC §13 阶段 3：claim 已过期时重新认领，attempts 必须递增（SPEC §8：重试计数只在 claim 里）。</summary>
+    /// <summary>SPEC §16 阶段 3：claim 已过期时重新认领，attempts 必须递增（SPEC §10：重试计数只在 claim 里）。</summary>
     [Fact]
     public void Tick_claim已过期_重新认领且attempts递增()
     {
@@ -54,7 +54,7 @@ public sealed class CourierRecoveryTests : TestRoot
 
         WriteExpiredClaimFile("worker", requestId, 1);
 
-        // SPEC §13.1：Tick 只负责启动，handler 在线程池上跑，所以必须等到空闲才看得到终态。
+        // SPEC §16.1：Tick 只负责启动，handler 在线程池上跑，所以必须等到空闲才看得到终态。
         node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         Assert.Equal(1, calls);
@@ -66,7 +66,7 @@ public sealed class CourierRecoveryTests : TestRoot
         AssertArchivedCommand("worker", requestId);
     }
 
-    /// <summary>SPEC §10 第 3 条：attempts 超过上限后进 deadletter，同时归档命令、删除 claim。</summary>
+    /// <summary>SPEC §12 第 3 条：attempts 超过上限后进 deadletter，同时归档命令、删除 claim。</summary>
     [Fact]
     public void Tick_attempts已达上限_进deadletter并归档命令()
     {
@@ -96,7 +96,7 @@ public sealed class CourierRecoveryTests : TestRoot
         AssertArchivedCommand("worker", requestId);
     }
 
-    /// <summary>SPEC §13 阶段 1：results 已存在时幂等跳过，绝不重跑 handler，并清掉命令与 claim。</summary>
+    /// <summary>SPEC §16 阶段 1：results 已存在时幂等跳过，绝不重跑 handler，并清掉命令与 claim。</summary>
     [Fact]
     public void Tick_results已存在_跳过执行并归档命令()
     {

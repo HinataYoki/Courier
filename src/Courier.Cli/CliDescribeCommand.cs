@@ -36,7 +36,9 @@ namespace Courier.Cli
             {
                 CliOutput.WriteLine(new CourierJsonObject()
                     .AddString("endpointId", endpoint.EndpointId)
+                    .AddString("sessionId", endpoint.SessionId)
                     .AddRaw("actions", CliJson.Actions(endpoint.Actions))
+                    .AddRaw("states", CliJson.States(endpoint.States))
                     .Build());
                 return CliExitCode.Ok;
             }
@@ -45,6 +47,13 @@ namespace Courier.Cli
             {
                 CourierActionInfo action = endpoint.Actions[index];
                 CliOutput.WriteLine(action.Channel + "/" + action.Action + "  " + action.Summary);
+            }
+
+            // SPEC §14：状态名是声明的，值在 state/ 下按需读；describe 只报名字，不读值。
+            for (int index = 0; index < endpoint.States.Count; index++)
+            {
+                CourierStateInfo state = endpoint.States[index];
+                CliOutput.WriteLine("state " + state.Name + "  " + state.Summary);
             }
 
             return CliExitCode.Ok;

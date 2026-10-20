@@ -14,7 +14,7 @@ namespace Courier.Tests;
 /// </summary>
 public abstract class TestRoot : IDisposable
 {
-    /// <summary>SPEC §15 原因码总表。服务者侧的每一个原因码都必须在这里，多一个就说明实现私自加了码。</summary>
+    /// <summary>SPEC §18 原因码总表。服务者侧的每一个原因码都必须在这里，多一个就说明实现私自加了码。</summary>
     private static readonly string[] SpecReasonTable =
     {
         CourierProtocol.ReasonStale,
@@ -112,7 +112,7 @@ public abstract class TestRoot : IDisposable
     }
 
     /// <summary>
-    /// 按 SPEC §7 手工投递一条命令（不经过 CourierNode，用于精确控制 deadline 与文件内容）。
+    /// 按 SPEC §9 手工投递一条命令（不经过 CourierNode，用于精确控制 deadline 与文件内容）。
     /// </summary>
     /// <returns>生成的 requestId，即命令文件名。</returns>
     protected string DeliverCommand(
@@ -143,7 +143,7 @@ public abstract class TestRoot : IDisposable
         CourierIO.WriteAtomic(CommandsPath(endpointId, fileName), json, true);
     }
 
-    /// <summary>按 SPEC §8.1 写一个租约：expiresAtUtc 是到期时刻，不是认领时刻。</summary>
+    /// <summary>按 SPEC §10.1 写一个租约：expiresAtUtc 是到期时刻，不是认领时刻。</summary>
     /// <param name="endpointId">目标端点。</param>
     /// <param name="requestId">命令标识。</param>
     /// <param name="expiresAtUtc">租约到期时刻。</param>
@@ -276,7 +276,7 @@ public abstract class TestRoot : IDisposable
     }
 
     /// <summary>
-    /// 断言命令被归档到 archive/&lt;yyyy-MM-dd&gt;/&lt;endpointId&gt;/commands/&lt;requestId&gt;.json（SPEC §12.1），
+    /// 断言命令被归档到 archive/&lt;yyyy-MM-dd&gt;/&lt;endpointId&gt;/commands/&lt;requestId&gt;.json（SPEC §15.1），
     /// 并返回归档后的绝对路径。
     /// </summary>
     protected string AssertArchivedCommand(string endpointId, string requestId)
@@ -304,7 +304,7 @@ public abstract class TestRoot : IDisposable
         return archived;
     }
 
-    /// <summary>断言 reason 严格取自 SPEC §15 总表，防止实现悄悄引入第四个原因码。</summary>
+    /// <summary>断言 reason 严格取自 SPEC §18 总表，防止实现悄悄引入第四个原因码。</summary>
     protected static void AssertReasonInSpecTable(string? reason)
     {
         Assert.NotNull(reason);
@@ -312,7 +312,7 @@ public abstract class TestRoot : IDisposable
     }
 
     /// <summary>
-    /// 在服务端持续 Tick 的同时异步调用它：长命宿主的标准用法（SPEC §14.3）。
+    /// 在服务端持续 Tick 的同时异步调用它：长命宿主的标准用法（SPEC §17.3）。
     /// 调用方与被调用方必须是两个不同的 CourierNode 实例。
     /// </summary>
     protected static async Task<CourierResponse> CallWithTickingAsync(

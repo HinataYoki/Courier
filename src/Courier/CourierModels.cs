@@ -5,8 +5,8 @@ using System.Collections.ObjectModel;
 namespace Courier
 {
     /// <summary>
-    /// 一次调用的结果（SPEC §9）。四种 status 覆盖全部情形：<c>ok</c>、<c>rejected</c>、<c>failed</c>
-    /// 三种来自对端落盘的 results 文件，<c>unreachable</c> 由调用方在超时后本地合成、没有对应文件（SPEC §9.2）。
+    /// 一次调用的结果（SPEC §11）。四种 status 覆盖全部情形：<c>ok</c>、<c>rejected</c>、<c>failed</c>
+    /// 三种来自对端落盘的 results 文件，<c>unreachable</c> 由调用方在超时后本地合成、没有对应文件（SPEC §11.2）。
     /// </summary>
     public sealed class CourierResponse
     {
@@ -16,13 +16,13 @@ namespace Courier
         /// <summary><c>ok</c>、<c>rejected</c>、<c>failed</c> 或 <c>unreachable</c>。</summary>
         public string Status { get; }
 
-        /// <summary>ok 时是 handler 的返回值；其余情形是诊断文本，可能为空串。Courier 从不解析它（SPEC §7）。</summary>
+        /// <summary>ok 时是 handler 的返回值；其余情形是诊断文本，可能为空串。Courier 从不解析它（SPEC §9）。</summary>
         public string Payload { get; }
 
-        /// <summary>status 不是 ok 时的原因码，取值见 SPEC §15；ok 时为 null。</summary>
+        /// <summary>status 不是 ok 时的原因码，取值见 SPEC §18；ok 时为 null。</summary>
         public string? Reason { get; }
 
-        /// <summary>handler 观察到取消请求但未采纳时，响应会带上该标记（SPEC §11.1）。</summary>
+        /// <summary>handler 观察到取消请求但未采纳时，响应会带上该标记（SPEC §13.1）。</summary>
         public bool CancelRequested { get; }
 
         /// <summary>对端完成处理的时刻；unreachable 时是本地放弃等待的时刻。</summary>
@@ -76,7 +76,7 @@ namespace Courier
                 completedAtUtc);
         }
 
-        /// <summary>序列化为 results/ 下的单行紧凑 JSON（SPEC §9）。reason 只在非 ok 时出现。</summary>
+        /// <summary>序列化为 results/ 下的单行紧凑 JSON（SPEC §11）。reason 只在非 ok 时出现。</summary>
         internal string ToJson()
         {
             var builder = new CourierJsonObject()
@@ -110,27 +110,19 @@ namespace Courier
         }
     }
 
-    /// <summary>快通道声明（SPEC §5）。本实现只走文件通道，这里仅做透传，不参与任何调度。</summary>
-    public sealed class CourierHotInfo
+    /// <summary>endpoint.json 里声明的一条状态（SPEC §5、§14）。只是名字与说明，值在 state/ 下按需读取。</summary>
+    public sealed class CourierStateInfo
     {
-        /// <summary><c>namedPipe</c>、<c>sharedMemory</c> 或 <c>fileMapping</c>。</summary>
-        public string Kind { get; }
+        /// <summary>状态名，满足 SPEC §4.3，对应 <c>state/&lt;name&gt;.json</c>。</summary>
+        public string Name { get; }
 
-        /// <summary>快通道地址，语义由 kind 决定。</summary>
-        public string Address { get; }
+        /// <summary>面向人和工具的简短说明。</summary>
+        public string Summary { get; }
 
-        /// <summary>快通道自身的协议标识。</summary>
-        public string Protocol { get; }
-
-        /// <summary>快通道不可用时的回退方式，SPEC 要求恒为 <c>file</c>。</summary>
-        public string Fallback { get; }
-
-        internal CourierHotInfo(string kind, string address, string protocol, string fallback)
+        internal CourierStateInfo(string name, string summary)
         {
-            Kind = kind;
-            Address = address;
-            Protocol = protocol;
-            Fallback = fallback;
+            Name = name;
+            Summary = summary;
         }
     }
 
@@ -155,11 +147,14 @@ namespace Courier
         /// <summary>端点声明的协议版本。</summary>
         public int ProtocolVersion { get; }
 
+        /// <summary>本次运行的会话标识（SPEC §5）；读不到时为空串。变了即代表端点是新的一轮运行。</summary>
+        public string SessionId { get; }
+
         /// <summary>已注册的能力。</summary>
         public IReadOnlyList<CourierActionInfo> Actions { get; }
 
-        /// <summary>快通道声明；没有声明时为 null。</summary>
-        public CourierHotInfo? Hot { get; }
+        /// <summary>已声明的状态名；没有声明时为空列表。</summary>
+        public IReadOnlyList<CourierStateInfo> States { get; }
 
         /// <summary>
         /// 心跳年龄（毫秒，SPEC §6）；读不到心跳时为 null。判活与"多少秒之前"共用这一个读数，
@@ -176,25 +171,27 @@ namespace Courier
         internal CourierEndpointInfo(
             string endpointId,
             string description,
+            string sessionId,
             int processId,
             DateTime startedAtUtc,
             int protocolVersion,
             List<CourierActionInfo> actions,
-            CourierHotInfo? hot,
+            List<CourierStateInfo> states,
             long? heartbeatAgeMs)
         {
             EndpointId = endpointId;
             Description = description;
+            SessionId = sessionId;
             ProcessId = processId;
             StartedAtUtc = startedAtUtc;
             ProtocolVersion = protocolVersion;
             Actions = new ReadOnlyCollection<CourierActionInfo>(actions);
-            Hot = hot;
+            States = new ReadOnlyCollection<CourierStateInfo>(states);
             HeartbeatAgeMs = heartbeatAgeMs;
         }
     }
 
-    /// <summary>commands/ 下一条命令的解析结果（SPEC §7）。任一字段缺失或非法都不得执行。</summary>
+    /// <summary>commands/ 下一条命令的解析结果（SPEC §9）。任一字段缺失或非法都不得执行。</summary>
     internal sealed class CourierCommand
     {
         internal string RequestId { get; private set; } = string.Empty;
@@ -206,8 +203,8 @@ namespace Courier
         internal string IssuedBy { get; private set; } = string.Empty;
 
         /// <summary>
-        /// 解析命令文件。requestId 必须与文件名一致（SPEC §7），因此文件名由调用方传入比对。
-        /// 任何缺失或非法都返回 null，由调用方进 deadletter（SPEC §10）。
+        /// 解析命令文件。requestId 必须与文件名一致（SPEC §9），因此文件名由调用方传入比对。
+        /// 任何缺失或非法都返回 null，由调用方进 deadletter（SPEC §12）。
         /// </summary>
         internal static CourierCommand? TryParse(string? text, string expectedRequestId)
         {
@@ -225,7 +222,7 @@ namespace Courier
             if (!CourierProtocol.TryParseUtc(CourierJson.GetString(document, "issuedAtUtc"), out issuedAtUtc)) return null;
             if (!CourierProtocol.TryParseUtc(CourierJson.GetString(document, "deadlineUtc"), out deadlineUtc)) return null;
 
-            // payload 是不透明字符串，可以为空串；非字符串（含 null）说明发送方违反了 SPEC §7。
+            // payload 是不透明字符串，可以为空串；非字符串（含 null）说明发送方违反了 SPEC §9。
             object? rawPayload;
             if (!document.TryGetValue("payload", out rawPayload)) return null;
             string? payload = rawPayload as string;
@@ -244,7 +241,7 @@ namespace Courier
             };
         }
 
-        /// <summary>按 SPEC §7 的字段顺序序列化，供测试与 CLI 构造命令使用。</summary>
+        /// <summary>按 SPEC §9 的字段顺序序列化，供测试与 CLI 构造命令使用。</summary>
         internal string ToJson()
         {
             return new CourierJsonObject()
@@ -274,7 +271,7 @@ namespace Courier
     }
 
     /// <summary>
-    /// claims/ 下的租约（SPEC §8.1）。attempts 是重试计数的唯一存放处——命令文件 MUST NOT 被改写。
+    /// claims/ 下的租约（SPEC §10.1）。attempts 是重试计数的唯一存放处——命令文件 MUST NOT 被改写。
     /// expiresAtUtc 是租约到期时刻，不是认领时刻：持有者在执行期间持续把它往后推，
     /// 别的服务循环只在它过期之后才接管。
     /// </summary>
@@ -314,14 +311,14 @@ namespace Courier
             return new CourierClaim { Owner = owner, ExpiresAtUtc = expiresAtUtc, Attempts = attempts };
         }
 
-        /// <summary>SPEC §8.1：把租约推到 now + ClaimWindow，保留 owner 与 attempts。</summary>
+        /// <summary>SPEC §10.1：把租约推到 now + ClaimWindow，保留 owner 与 attempts。</summary>
         internal CourierClaim Renew(DateTime nowUtc)
         {
             return new CourierClaim { Owner = Owner, ExpiresAtUtc = nowUtc + CourierProtocol.ClaimWindow, Attempts = Attempts };
         }
     }
 
-    /// <summary>deadletter/ 下的失败证据（SPEC §10）。写入前必须先落 results 再搬命令，避免命令凭空消失。</summary>
+    /// <summary>deadletter/ 下的失败证据（SPEC §12）。写入前必须先落 results 再搬命令，避免命令凭空消失。</summary>
     internal sealed class CourierDeadletter
     {
         internal string RequestId { get; private set; } = string.Empty;

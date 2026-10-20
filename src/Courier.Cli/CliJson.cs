@@ -44,8 +44,25 @@ namespace Courier.Cli
             return CourierJson.Array(items);
         }
 
+        /// <summary>把 endpoint.json 里的 states 序列化成 <c>[{"name":..,"summary":..}]</c>（SPEC §14）。</summary>
+        /// <param name="states">已声明的状态名。</param>
+        /// <returns>JSON 数组文本。</returns>
+        internal static string States(IReadOnlyList<CourierStateInfo> states)
+        {
+            var items = new List<string>(states.Count);
+            for (int index = 0; index < states.Count; index++)
+            {
+                CourierStateInfo state = states[index];
+                items.Add(new CourierJsonObject()
+                    .AddString("name", state.Name)
+                    .AddString("summary", state.Summary)
+                    .Build());
+            }
+            return CourierJson.Array(items);
+        }
+
         /// <summary>
-        /// payload 是"不透明字符串"（SPEC §7）。如果它本身就是一段合法 JSON，就直接嵌入，
+        /// payload 是"不透明字符串"（SPEC §9）。如果它本身就是一段合法 JSON，就直接嵌入，
         /// 让 `courier call ... --json` 的输出可直接被机器消费；否则当成字符串转义。
         /// 这一步只影响显示，不影响协议：落盘与解析始终按字符串处理。
         /// </summary>

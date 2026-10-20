@@ -8,27 +8,33 @@ using System.Text;
 namespace Courier
 {
     /// <summary>
-    /// 协议常量、标识符校验与时间格式化。所有数值都来自 SPEC §16，改动任何一项都必须先改 SPEC。
+    /// 协议常量、标识符校验与时间格式化。所有数值都来自 SPEC §19，改动任何一项都必须先改 SPEC。
     /// </summary>
     internal static class CourierProtocol
     {
         /// <summary>SPEC §4.4：唯一的版本字段，命令与响应里不得重复携带。</summary>
-        internal const int ProtocolVersion = 1;
+        internal const int ProtocolVersion = 2;
 
-        /// <summary>SPEC §16：命令文件字节上限，1 MiB + 4 KiB，MUST NOT 配置。</summary>
+        /// <summary>SPEC §19：命令文件字节上限，1 MiB + 4 KiB，MUST NOT 配置。</summary>
         internal const int MaxCommandFileBytes = (1024 * 1024) + 4096;
 
-        /// <summary>SPEC §16：投递方判定背压的 commands/ 文件数阈值。</summary>
+        /// <summary>SPEC §19：投递方判定背压的 commands/ 文件数阈值。</summary>
         internal const int MaxCommandsBackpressure = 4096;
 
-        /// <summary>SPEC §16：单次 Tick 最多**启动**多少条命令，防止积压拖死宿主。</summary>
+        /// <summary>SPEC §19：单次 Tick 最多**启动**多少条命令，防止积压拖死宿主。</summary>
         internal const int MaxTickBatch = 16;
 
-        /// <summary>SPEC §13.1：单个端点同时在跑的 handler 上限，防止积压时把线程池占满。</summary>
+        /// <summary>SPEC §16.1：单个端点同时在跑的 handler 上限，防止积压时把线程池占满。</summary>
         internal const int MaxInflight = 4;
 
-        /// <summary>SPEC §16：同一条命令最多尝试几次。</summary>
+        /// <summary>SPEC §19：同一条命令最多尝试几次。</summary>
         internal const int MaxAttempts = 3;
+
+        /// <summary>SPEC §19：单个状态文件的字节上限，超出 MUST 拒写而不是截断（§14）。</summary>
+        internal const int MaxStateBytes = 1024 * 1024;
+
+        /// <summary>SPEC §19：单个端点可声明的状态名上限。</summary>
+        internal const int MaxStateNames = 256;
 
         /// <summary>
         /// 复用的 CSPRNG 句柄。临时文件名、备份名与 requestId 随机段每次落盘都要取随机数，
@@ -56,19 +62,19 @@ namespace Courier
         };
 
         /// <summary>
-        /// SPEC §8.1：claim 的租约长度。认领时写 expiresAtUtc = now + ClaimWindow，
+        /// SPEC §10.1：claim 的租约长度。认领时写 expiresAtUtc = now + ClaimWindow，
         /// 执行期间由 Tick 按 <see cref="ClaimRenewInterval"/> 续约。慢 handler 靠续约维持租约，
         /// 不靠把窗口调大——窗口只需要大于一个续约周期，不需要大于最长执行时间。
         /// </summary>
         internal static readonly TimeSpan ClaimWindow = TimeSpan.FromSeconds(10);
 
-        /// <summary>SPEC §16：续约间隔，MUST 小于 <see cref="ClaimWindow"/>。</summary>
+        /// <summary>SPEC §19：续约间隔，MUST 小于 <see cref="ClaimWindow"/>。</summary>
         internal static readonly TimeSpan ClaimRenewInterval = TimeSpan.FromSeconds(2);
 
-        /// <summary>SPEC §16：投递时默认的 deadline 长度，可由调用方按次覆盖。</summary>
+        /// <summary>SPEC §19：投递时默认的 deadline 长度，可由调用方按次覆盖。</summary>
         internal static readonly TimeSpan DefaultDeadline = TimeSpan.FromSeconds(10);
 
-        /// <summary>SPEC §16：调用方给的 deadline 上限，超过即截断，防止命令在盘上躺太久。</summary>
+        /// <summary>SPEC §19：调用方给的 deadline 上限，超过即截断，防止命令在盘上躺太久。</summary>
         internal static readonly TimeSpan MaxDeadline = TimeSpan.FromSeconds(300);
 
         /// <summary>SPEC §6：age 小于等于该值即 alive。</summary>
@@ -77,16 +83,16 @@ namespace Courier
         /// <summary>SPEC §6：age 大于该值即 dead。</summary>
         internal static readonly TimeSpan HeartbeatDead = TimeSpan.FromSeconds(15);
 
-        /// <summary>SPEC §9：handler 正常返回。</summary>
+        /// <summary>SPEC §11：handler 正常返回。</summary>
         internal const string StatusOk = "ok";
 
-        /// <summary>SPEC §9.1：请求本身不合法，未被执行业务逻辑，重试通常无意义。</summary>
+        /// <summary>SPEC §11.1：请求本身不合法，未被执行业务逻辑，重试通常无意义。</summary>
         internal const string StatusRejected = "rejected";
 
-        /// <summary>SPEC §9.1：业务逻辑执行了但失败，与 rejected 严格区分。</summary>
+        /// <summary>SPEC §11.1：业务逻辑执行了但失败，与 rejected 严格区分。</summary>
         internal const string StatusFailed = "failed";
 
-        /// <summary>SPEC §9.2：调用方在超时后本地合成的结果，不落盘、没有对应文件。</summary>
+        /// <summary>SPEC §11.2：调用方在超时后本地合成的结果，不落盘、没有对应文件。</summary>
         internal const string StatusUnreachable = "unreachable";
 
         internal const string ReasonStale = "stale";
@@ -114,6 +120,7 @@ namespace Courier
         internal const string DeadletterDirectory = "deadletter";
         internal const string CancelsDirectory = "cancels";
         internal const string ProgressDirectory = "progress";
+        internal const string StateDirectory = "state";
         internal const string ArchiveDirectory = "archive";
         internal const string EndpointFileName = "endpoint.json";
         internal const string HeartbeatFileName = "heartbeat";
@@ -134,7 +141,10 @@ namespace Courier
             return true;
         }
 
-        /// <summary>SPEC §4.3：channel 与 action 共用同一套命名规则，区分大小写；为 true 时参数必非 null。</summary>
+        /// <summary>
+        /// SPEC §4.3：channel、action 与 state 名共用同一套命名规则，区分大小写；为 true 时参数必非 null。
+        /// 正则只是第一道闸，"."、".." 与首尾点这些在路径语义上有特殊含义的名字在这里一并拒掉。
+        /// </summary>
         internal static bool IsValidName([NotNullWhen(true)] string? value)
         {
             if (value == null || value.Length == 0 || value.Length > 64) return false;
@@ -147,13 +157,17 @@ namespace Courier
                     || current == '_' || current == '.' || current == '-';
                 if (!valid) return false;
             }
+
+            // 名字要直接拼成文件名，"." 与 ".." 会分别落到当前目录与父目录上。
+            if (value[0] == '.' || value[value.Length - 1] == '.') return false;
             return true;
         }
 
-        /// <summary>SPEC §4.2：requestId 必须是时间戳前缀加 8 位小写 hex，随机段 MUST 存在。</summary>
+        /// <summary>SPEC §4.2：requestId 必须是时间戳前缀加 8–32 位小写 hex，随机段 MUST 存在。</summary>
         internal static bool IsValidRequestId(string? value)
         {
-            if (value == null || value.Length != 25) return false;
+            // 前缀 "yyyyMMddTHHmmssZ-" 定长 17，随机段 8–32 位，故总长 25–49。
+            if (value == null || value.Length < 25 || value.Length > 49) return false;
             for (int index = 0; index < 8; index++)
             {
                 if (value[index] < '0' || value[index] > '9') return false;
@@ -164,7 +178,7 @@ namespace Courier
                 if (value[index] < '0' || value[index] > '9') return false;
             }
             if (value[15] != 'Z' || value[16] != '-') return false;
-            for (int index = 17; index < 25; index++)
+            for (int index = 17; index < value.Length; index++)
             {
                 char current = value[index];
                 bool valid = (current >= '0' && current <= '9') || (current >= 'a' && current <= 'f');
@@ -178,6 +192,15 @@ namespace Courier
         {
             DateTime now = DateTime.UtcNow;
             return now.ToString("yyyyMMdd'T'HHmmss'Z'", CultureInfo.InvariantCulture) + "-" + RandomHex(8);
+        }
+
+        /// <summary>
+        /// 生成新的会话标识（SPEC §5）。每次启动换新，让读方分辨「同一端点的新一轮运行」——
+        /// processId 会被 OS 复用、startedAtUtc 可能被复制，只有它是这个实例独有的。
+        /// </summary>
+        internal static string NewSessionId()
+        {
+            return RandomHex(16);
         }
 
         /// <summary>SPEC §3.2：UTC、RFC 3339、以 Z 结尾、7 位小数秒。</summary>

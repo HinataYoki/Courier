@@ -53,6 +53,27 @@ namespace Courier
             return null;
         }
 
+        /// <summary>
+        /// 解析任意 JSON 值（对象、数组、字符串、数字、布尔、null）。state/ 的 payload 是不透明的任意值，
+        /// 只接受对象会让"发布一个数字"这种合法用法被拒（SPEC §14）。
+        /// </summary>
+        internal static bool TryParseValue(string? text, out object? value)
+        {
+            value = null;
+            if (string.IsNullOrEmpty(text)) return false;
+            try
+            {
+                int index = 0;
+                value = ParseValueAt(text, ref index, 0);
+                SkipWhitespace(text, ref index);
+                return index == text.Length;
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+        }
+
         /// <summary>读取数组字段；缺失或类型不符时返回 null。</summary>
         internal static List<object?>? GetArray(Dictionary<string, object?>? source, string name)
         {

@@ -64,7 +64,7 @@ namespace Courier
 
         /// <summary>
         /// 把 <paramref name="source"/> 移动到 <paramref name="destination"/>，目标已存在时覆盖。
-        /// 覆盖写与归档共用（SPEC §3.3 第 4 步、§12.1）。
+        /// 覆盖写与归档共用（SPEC §3.3 第 4 步、§15.1）。
         /// </summary>
         /// <remarks>
         /// 优先 File.Replace：Windows 上 File.Move(..., overwrite: true) 在目标正被读者打开时抛
@@ -166,7 +166,7 @@ namespace Courier
             Directory.CreateDirectory(path);
         }
 
-        /// <summary>统计目录下 .json 文件数，用于背压判定（SPEC §7.3）。</summary>
+        /// <summary>统计目录下 .json 文件数，用于背压判定（SPEC §9.3）。</summary>
         internal static int CountJsonFiles(string directory)
         {
             if (!Directory.Exists(directory)) return 0;

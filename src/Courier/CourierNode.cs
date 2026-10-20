@@ -11,11 +11,11 @@ namespace Courier
     /// 一个 Courier 端点：既是命令的服务者，也是其他端点的调用方（SPEC §1：两端对等，没有客户端/服务端之分）。
     /// <para>
     /// 所有落盘都经由 <see cref="CourierIO.WriteAtomic"/>，所有读取都带 SPEC §3.4 的有界重试。
-    /// <see cref="Tick"/> 是非阻塞的泵（SPEC §13）：启动 handler 后立即返回，不等它跑完，
+    /// <see cref="Tick"/> 是非阻塞的泵（SPEC §16）：启动 handler 后立即返回，不等它跑完，
     /// 因此 handler 执行期间心跳、取消与租约续约都照常推进。
     /// </para>
     /// <para>
-    /// 线程约束：<see cref="Tick"/> MUST NOT 并发调用（SPEC §13.1）；handler 在线程池上运行，与 Tick 并发。
+    /// 线程约束：<see cref="Tick"/> MUST NOT 并发调用（SPEC §16.1）；handler 在线程池上运行，与 Tick 并发。
     /// 能力表在第一次 Tick 之前写完即冻结（SPEC §5），之后再注册会抛 <see cref="InvalidOperationException"/>。
     /// </para>
     /// </summary>
@@ -26,10 +26,23 @@ namespace Courier
         private readonly string mDescription;
         private readonly Dictionary<string, HandlerEntry> mHandlers;
 
-        /// <summary>保护 <see cref="mInflight"/>：Tick 线程、handler 线程与 Dispose 都会碰它（SPEC §13.1）。</summary>
+        /// <summary>保护 <see cref="mInflight"/>：Tick 线程、handler 线程与 Dispose 都会碰它（SPEC §16.1）。</summary>
         private readonly object mGate = new object();
 
         private readonly Dictionary<string, InflightEntry> mInflight;
+
+        /// <summary>SPEC §5：本次运行的会话标识，每次 Open 换新。读写方据此分辨"同一端点的新一轮运行"。</summary>
+        private readonly string mSessionId;
+
+        /// <summary>SPEC §14：本端点声明过的状态名与说明，写入 endpoint.json 的 states 数组。</summary>
+        private readonly List<StateEntry> mStates;
+
+        /// <summary>SPEC §14：每个状态名最近一次发布的 revision，保证单调递增。</summary>
+        private readonly Dictionary<string, long> mStateRevisions;
+
+        /// <summary>保护 <see cref="mStateRevisions"/>：状态可以由宿主从任意线程发布，与 Tick 无关。</summary>
+        private readonly object mStateGate = new object();
+
         private readonly DateTime mStartedAtUtc;
         private string mEndpointDirectory = string.Empty;
         private string mCommandsDirectory = string.Empty;
@@ -38,6 +51,7 @@ namespace Courier
         private string mDeadletterDirectory = string.Empty;
         private string mCancelsDirectory = string.Empty;
         private string mProgressDirectory = string.Empty;
+        private string mStateDirectory = string.Empty;
         private bool mStarted;
         private bool mDisposed;
 
@@ -48,11 +62,14 @@ namespace Courier
             mDescription = description;
             mHandlers = new Dictionary<string, HandlerEntry>(StringComparer.Ordinal);
             mInflight = new Dictionary<string, InflightEntry>(StringComparer.Ordinal);
+            mSessionId = CourierProtocol.NewSessionId();
+            mStates = new List<StateEntry>();
+            mStateRevisions = new Dictionary<string, long>(StringComparer.Ordinal);
             mStartedAtUtc = DateTime.UtcNow;
         }
 
         /// <summary>打开（必要时创建）root 下的端点目录并写入 endpoint.json（SPEC §5）。</summary>
-        /// <param name="rootDirectory">协议根目录；不得位于共享临时目录或云同步目录（SPEC §17）。</param>
+        /// <param name="rootDirectory">协议根目录；不得位于共享临时目录或云同步目录（SPEC §20）。</param>
         /// <param name="endpointId">端点标识，必须满足 SPEC §4.1 的正则，否则抛出 <see cref="ArgumentException"/> 且不写任何文件。</param>
         /// <param name="description">端点自述，可为 null。</param>
         /// <exception cref="ArgumentException">rootDirectory 为空或 endpointId 非法。</exception>
@@ -76,7 +93,7 @@ namespace Courier
         /// <param name="channel">信道名，须满足 SPEC §4.3。</param>
         /// <param name="action">动作名，须满足 SPEC §4.3。</param>
         /// <param name="summary">面向人和工具的说明，写入 endpoint.json。</param>
-        /// <param name="handler">处理函数；<c>token</c> 在投递方请求取消时被触发（SPEC §11.1）。</param>
+        /// <param name="handler">处理函数；<c>token</c> 在投递方请求取消时被触发（SPEC §13.1）。</param>
         /// <exception cref="ArgumentException">channel 或 action 非法，或 (channel, action) 已注册。</exception>
         /// <exception cref="ArgumentNullException">handler 为 null。</exception>
         /// <exception cref="InvalidOperationException">第一次 Tick 之后才注册（SPEC §5：能力表已冻结）。</exception>
@@ -90,14 +107,14 @@ namespace Courier
         /// <param name="channel">信道名，须满足 SPEC §4.3。</param>
         /// <param name="action">动作名，须满足 SPEC §4.3。</param>
         /// <param name="summary">面向人和工具的说明，写入 endpoint.json。</param>
-        /// <param name="handler">处理函数，入参与返回值都是不透明字符串（SPEC §7）。</param>
+        /// <param name="handler">处理函数，入参与返回值都是不透明字符串（SPEC §9）。</param>
         public void Handle(string channel, string action, string summary, Func<string, string> handler)
         {
             if (handler == null) throw new ArgumentNullException(nameof(handler));
             Register(channel, action, summary, (payload, token) => Task.FromResult(handler(payload)));
         }
 
-        /// <summary>注册一个异步能力。长命宿主 SHOULD 使用它，handler 与 Tick 并发推进（SPEC §13.1）。</summary>
+        /// <summary>注册一个异步能力。长命宿主 SHOULD 使用它，handler 与 Tick 并发推进（SPEC §16.1）。</summary>
         /// <param name="channel">信道名，须满足 SPEC §4.3。</param>
         /// <param name="action">动作名，须满足 SPEC §4.3。</param>
         /// <param name="summary">面向人和工具的说明，写入 endpoint.json。</param>
@@ -119,10 +136,86 @@ namespace Courier
             Register(channel, action, summary, (payload, token) => handler(payload));
         }
 
+        /// <summary>声明一个状态名，写入 endpoint.json 的 states 数组（SPEC §14）。</summary>
+        /// <param name="name">状态名，须满足 SPEC §4.3。</param>
+        /// <param name="summary">面向人和工具的说明。</param>
+        /// <exception cref="ArgumentException">名字非法，或同一个名字已声明过。</exception>
+        /// <exception cref="InvalidOperationException">第一次 Tick 之后才声明（SPEC §5：能力表已冻结）。</exception>
+        public void DeclareState(string name, string summary)
+        {
+            ThrowIfDisposed();
+            // SPEC §5：states 与 actions 同属 endpoint.json，冻结时机一致。
+            if (mStarted) throw new InvalidOperationException("capabilities are frozen after the first Tick (SPEC §5)");
+            if (!CourierProtocol.IsValidName(name)) throw new ArgumentException("invalid state name: must match ^[A-Za-z0-9_.-]{1,64}$", nameof(name));
+            for (int index = 0; index < mStates.Count; index++)
+            {
+                if (string.Equals(mStates[index].Name, name, StringComparison.Ordinal))
+                {
+                    throw new ArgumentException("duplicate state declaration for " + name, nameof(name));
+                }
+            }
+
+            if (mStates.Count >= CourierProtocol.MaxStateNames)
+            {
+                throw new InvalidOperationException("too many state names (MAX_STATE_NAMES = " + CourierProtocol.MaxStateNames + ")");
+            }
+
+            mStates.Add(new StateEntry(name, summary ?? string.Empty));
+            WriteEndpointJson();
+        }
+
         /// <summary>
-        /// 驱动一轮服务者循环（SPEC §13）：写心跳 → 处理 cancels/ → 收割已完成的 in-flight → 续约仍在执行的
+        /// 发布一个状态的最新值（SPEC §14）。覆盖写 <c>state/&lt;name&gt;.json</c>，没有回执、没有终态证据。
+        /// </summary>
+        /// <param name="name">已声明的状态名。</param>
+        /// <param name="payloadJson">payload 的 JSON 文本；可为任意 JSON 值（对象、数组、字符串、数字、布尔、null）。</param>
+        /// <returns>本次发布的 <c>revision</c>。</returns>
+        /// <exception cref="ArgumentException">名字未声明，或 payloadJson 不是合法 JSON。</exception>
+        /// <exception cref="IOException">写入失败；调用方自行决定是否重试。</exception>
+        public long PublishState(string name, string payloadJson)
+        {
+            ThrowIfDisposed();
+            if (!IsDeclaredState(name))
+            {
+                // SPEC §14：投递方 MUST NOT 猜测未声明的状态名，发布方同样不能。
+                throw new ArgumentException("state \"" + name + "\" was never declared", nameof(name));
+            }
+
+            if (!CourierJson.TryParseValue(payloadJson, out _))
+            {
+                throw new ArgumentException("payload is not valid JSON", nameof(payloadJson));
+            }
+
+            long revision;
+            lock (mStateGate)
+            {
+                // SPEC §14：revision 单调递增。用端点内计数而不是读盘回填，避免"文件被外部删掉后重新从 1 开始"。
+                mStateRevisions.TryGetValue(name, out long previous);
+                revision = previous + 1;
+                mStateRevisions[name] = revision;
+            }
+
+            string json = new CourierJsonObject()
+                .AddString("name", name)
+                .AddNumber("revision", revision)
+                .AddString("updatedAtUtc", CourierProtocol.FormatUtc(DateTime.UtcNow))
+                .AddRaw("payload", payloadJson)
+                .Build();
+
+            // SPEC §14 + §19：状态文件超上限 MUST 拒写而不是截断——截断会写出一份坏 JSON。
+            if (System.Text.Encoding.UTF8.GetByteCount(json) > CourierProtocol.MaxStateBytes)
+            {
+                throw new ArgumentException("state payload exceeds MAX_STATE_BYTES", nameof(payloadJson));
+            }
+
+            CourierIO.WriteAtomic(Path.Combine(mStateDirectory, name + CourierProtocol.JsonExtension), json, true);
+            return revision;
+        }
+
+        /// <summary>
+        /// 驱动一轮服务者循环（SPEC §16）：写心跳 → 处理 cancels/ → 收割已完成的 in-flight → 续约仍在执行的
         /// in-flight → 按文件名升序在名额内启动至多 <c>MAX_TICK_BATCH</c> 条命令 → 清理终态 progress。
-        /// <para>这是一个**非阻塞的泵**：启动 handler 后立即返回，MUST NOT 等 handler 跑完（SPEC §13.1）。MUST NOT 并发调用。</para>
+        /// <para>这是一个**非阻塞的泵**：启动 handler 后立即返回，MUST NOT 等 handler 跑完（SPEC §16.1）。MUST NOT 并发调用。</para>
         /// </summary>
         public void Tick()
         {
@@ -130,7 +223,7 @@ namespace Courier
             // SPEC §5：第一次 Tick 之前是能力表的写入窗口，之后冻结。
             mStarted = true;
 
-            // 每一步各自兜住 I/O 故障：任何一步失败都不该让服务循环停摆（SPEC §13.2 最后一条）。
+            // 每一步各自兜住 I/O 故障：任何一步失败都不该让服务循环停摆（SPEC §16.2 最后一条）。
             try { WriteHeartbeat(); }
             catch (Exception caught) when (IsIoFailure(caught)) { }
             try { ProcessCancels(); }
@@ -161,12 +254,12 @@ namespace Courier
             }
         }
 
-        /// <summary>异步投递并等待结果（SPEC §14）。等待期间不会驱动本节点的 Tick，因此可在 Tick 循环的线程上安全调用。</summary>
+        /// <summary>异步投递并等待结果（SPEC §17）。等待期间不会驱动本节点的 Tick，因此可在 Tick 循环的线程上安全调用。</summary>
         /// <param name="endpointId">目标端点，须满足 SPEC §4.1。</param>
         /// <param name="channel">目标信道。</param>
         /// <param name="action">目标动作。</param>
         /// <param name="payload">不透明字符串，可为 null 或空串。</param>
-        /// <param name="timeout">等待上限，同时作为命令的 deadline（SPEC §7.1）；超时返回 <c>unreachable</c>，不落盘（SPEC §9.2）。</param>
+        /// <param name="timeout">等待上限，同时作为命令的 deadline（SPEC §9.1）；超时返回 <c>unreachable</c>，不落盘（SPEC §11.2）。</param>
         /// <returns>四种结果之一，永不返回 null。</returns>
         /// <exception cref="ArgumentException">参数非法，或 timeout 不是正数。</exception>
         public async Task<CourierResponse> CallAsync(string endpointId, string channel, string action, string? payload, TimeSpan timeout)
@@ -174,12 +267,12 @@ namespace Courier
             ThrowIfDisposed();
             ValidateCall(endpointId, channel, action, timeout);
             string requestId;
-            // SPEC §7.1：deadline 由调用方按次指定。等待上限就是这条命令的 deadline——
+            // SPEC §9.1：deadline 由调用方按次指定。等待上限就是这条命令的 deadline——
             // 比等待时间更短的 deadline 会让服务者先判 stale，比它更长则让命令在调用方放弃后还占着队列。
             CourierResponse? early = CourierDispatcher.Deliver(mRootDirectory, mEndpointId, endpointId, channel, action, payload, timeout, out requestId);
             if (early != null) return early;
 
-            // SPEC §14.2：10 ms 起指数退避到 200 ms 上限，MUST NOT 无限等待。
+            // SPEC §17.2：10 ms 起指数退避到 200 ms 上限，MUST NOT 无限等待。
             string resultPath = Path.Combine(mRootDirectory, CourierProtocol.EndpointsDirectory, endpointId, CourierProtocol.ResultsDirectory, requestId + CourierProtocol.JsonExtension);
             DateTime deadline = DateTime.UtcNow + timeout;
             int delayMilliseconds = 10;
@@ -200,11 +293,11 @@ namespace Courier
                 if (delayMilliseconds > 200) delayMilliseconds = 200;
             }
 
-            // SPEC §9.2：unreachable 是调用方合成的结果，不写任何文件。
+            // SPEC §11.2：unreachable 是调用方合成的结果，不写任何文件。
             return new CourierResponse(requestId, CourierProtocol.StatusUnreachable, string.Empty, null, false, DateTime.UtcNow);
         }
 
-        /// <summary>同步投递并等待结果。只在没有 Tick 循环的短命进程里安全（SPEC §14.3）。</summary>
+        /// <summary>同步投递并等待结果。只在没有 Tick 循环的短命进程里安全（SPEC §17.3）。</summary>
         /// <param name="endpointId">目标端点，须满足 SPEC §4.1。</param>
         /// <param name="channel">目标信道。</param>
         /// <param name="action">目标动作。</param>
@@ -229,7 +322,7 @@ namespace Courier
         /// <summary>
         /// 结束本端点的服务。在途 handler 会被取消并最多等 2 秒收尾，期间已产出的终态照常落盘；
         /// 仍跑不完的那些，其命令留在 <c>commands/</c>，租约到期后由下一次 Tick 按 <c>attempts + 1</c> 重试——
-        /// 这是 at-least-once 的正常路径，不是丢失（SPEC §1、§8.1）。磁盘上的端点目录、claim 与数据全部保留（SPEC §2）。
+        /// 这是 at-least-once 的正常路径，不是丢失（SPEC §1、§10.1）。磁盘上的端点目录、claim 与数据全部保留（SPEC §2）。
         /// </summary>
         public void Dispose()
         {
@@ -278,6 +371,7 @@ namespace Courier
             mDeadletterDirectory = Path.Combine(mEndpointDirectory, CourierProtocol.DeadletterDirectory);
             mCancelsDirectory = Path.Combine(mEndpointDirectory, CourierProtocol.CancelsDirectory);
             mProgressDirectory = Path.Combine(mEndpointDirectory, CourierProtocol.ProgressDirectory);
+            mStateDirectory = Path.Combine(mEndpointDirectory, CourierProtocol.StateDirectory);
 
             CourierIO.EnsureDirectory(mEndpointDirectory);
             CourierIO.EnsureDirectory(mCommandsDirectory);
@@ -286,6 +380,7 @@ namespace Courier
             CourierIO.EnsureDirectory(mDeadletterDirectory);
             CourierIO.EnsureDirectory(mCancelsDirectory);
             CourierIO.EnsureDirectory(mProgressDirectory);
+            CourierIO.EnsureDirectory(mStateDirectory);
 
             // SPEC §5：endpoint.json 必须整体原子替换，绝不能增量追加——追加会留下永远 rejected/unknown-action 的幽灵能力。
             WriteEndpointJson();
@@ -325,13 +420,28 @@ namespace Courier
                     .Build());
             }
 
+            // SPEC §14：states 是"这个端点会发布哪些状态"的声明，按名字序数升序，便于 diff 与逐行处理。
+            var states = new List<StateEntry>(mStates);
+            states.Sort(CompareStates);
+            var stateParts = new List<string>(states.Count);
+            for (int index = 0; index < states.Count; index++)
+            {
+                stateParts.Add(new CourierJsonObject()
+                    .AddString("name", states[index].Name)
+                    .AddString("summary", states[index].Summary)
+                    .Build());
+            }
+
             string json = new CourierJsonObject()
                 .AddString("endpointId", mEndpointId)
                 .AddString("description", mDescription)
+                // SPEC §5：sessionId 让读方分辨"同一端点的新一轮运行"——processId 会被复用，startedAtUtc 可能被复制。
+                .AddString("sessionId", mSessionId)
                 .AddNumber("processId", CourierProtocol.CurrentProcessId())
                 .AddString("startedAtUtc", CourierProtocol.FormatUtc(mStartedAtUtc))
                 .AddNumber("protocolVersion", CourierProtocol.ProtocolVersion)
                 .AddRaw("actions", CourierJson.Array(parts))
+                .AddRaw("states", CourierJson.Array(stateParts))
                 .Build();
 
             CourierIO.WriteAtomic(Path.Combine(mEndpointDirectory, CourierProtocol.EndpointFileName), json, true);
@@ -357,7 +467,7 @@ namespace Courier
             if (timeout <= TimeSpan.Zero) throw new ArgumentException("timeout must be positive", nameof(timeout));
         }
 
-        /// <summary>SPEC §11.1：把取消意图送到正在执行的 handler 手里，或对尚未开始的命令直接落终态。</summary>
+        /// <summary>SPEC §13.1：把取消意图送到正在执行的 handler 手里，或对尚未开始的命令直接落终态。</summary>
         private void ProcessCancels()
         {
             string[] files;
@@ -380,7 +490,7 @@ namespace Courier
                     continue;
                 }
 
-                // SPEC §11.1：对**正在执行**的 requestId 触发 CancellationToken。这正是 Tick 不被 handler
+                // SPEC §13.1：对**正在执行**的 requestId 触发 CancellationToken。这正是 Tick 不被 handler
                 // 阻塞换来的能力——handler 在别的线程上跑，Tick 照常进来把信号递到它手里。
                 bool signalled = false;
                 lock (mGate)
@@ -399,8 +509,8 @@ namespace Courier
                     }
                 }
 
-                // SPEC §11.1：命令尚未开始执行时，直接落 rejected/cancelled-before-start 并归档，不进 handler。
-                // 但"尚未开始"必须以 claims/ 为准（SPEC §8.1）：命令文件还在、claim 却新鲜，说明另一个进程正在跑，
+                // SPEC §13.1：命令尚未开始执行时，直接落 rejected/cancelled-before-start 并归档，不进 handler。
+                // 但"尚未开始"必须以 claims/ 为准（SPEC §10.1）：命令文件还在、claim 却新鲜，说明另一个进程正在跑，
                 // 此时写终态会让同一 requestId 出现两次结果，还留下一条永远删不掉的孤儿 claim。
                 if (!signalled
                     && !IsClaimedByOther(Path.Combine(mClaimsDirectory, requestId + CourierProtocol.JsonExtension))
@@ -416,12 +526,12 @@ namespace Courier
                 }
 
                 // 取消标记本身是投递方的意图，处理完就删；没能生效的（命令正在别处执行）也删，
-                // 因为取消是尽力而为（SPEC §11.1），留着只会让下一轮重复判定。
+                // 因为取消是尽力而为（SPEC §13.1），留着只会让下一轮重复判定。
                 CourierIO.TryDelete(files[index]);
             }
         }
 
-        /// <summary>SPEC §13 第 6 步：在名额内按文件名升序启动命令，启动即返回，不等 handler 结束。</summary>
+        /// <summary>SPEC §16 第 6 步：在名额内按文件名升序启动命令，启动即返回，不等 handler 结束。</summary>
         private void StartCommands()
         {
             string[] files;
@@ -445,7 +555,7 @@ namespace Courier
                 string requestId = Path.GetFileNameWithoutExtension(commandFiles[index]);
                 lock (mGate)
                 {
-                    // SPEC §13.1：名额满了就停，不阻塞等别人跑完。
+                    // SPEC §16.1：名额满了就停，不阻塞等别人跑完。
                     if (mInflight.Count >= CourierProtocol.MaxInflight) return;
                     if (mInflight.ContainsKey(requestId)) continue;
                 }
@@ -454,7 +564,7 @@ namespace Courier
             }
         }
 
-        /// <summary>SPEC §13.2 的 Start：走完 1–8 步后把 handler 交给线程池；返回是否真的启动了。</summary>
+        /// <summary>SPEC §16.2 的 Start：走完 1–8 步后把 handler 交给线程池；返回是否真的启动了。</summary>
         private bool StartCommand(string commandPath)
         {
             string requestId = Path.GetFileNameWithoutExtension(commandPath);
@@ -464,7 +574,7 @@ namespace Courier
             // 第 1 步：results 已存在说明这条命令处理完了，删掉残留命令即可，绝不重复执行。
             if (File.Exists(resultPath))
             {
-                // 幂等跳过也要清干净：崩溃可能停在"写完 results、还没删 progress"之间（SPEC §11.2）。
+                // 幂等跳过也要清干净：崩溃可能停在"写完 results、还没删 progress"之间（SPEC §13.2）。
                 ArchiveCommand(requestId, commandPath);
                 CourierIO.TryDelete(claimPath);
                 DeleteProgress(requestId);
@@ -477,7 +587,7 @@ namespace Courier
                 return false;
             }
 
-            // 第 2/3 步（SPEC §8.1）：租约未到期就说明持有者还在跑，本轮跳过；到期则接管并把 attempts +1。
+            // 第 2/3 步（SPEC §10.1）：租约未到期就说明持有者还在跑，本轮跳过；到期则接管并把 attempts +1。
             int attempts = 1;
             CourierClaim? existingClaim = null;
             string? claimText;
@@ -493,7 +603,7 @@ namespace Courier
                 }
             }
 
-            // 第 4 步（SPEC §7.2）：先看长度再读入内存，超限文件永远不进进程地址空间。
+            // 第 4 步（SPEC §9.2）：先看长度再读入内存，超限文件永远不进进程地址空间。
             long length;
             try
             {
@@ -511,7 +621,7 @@ namespace Courier
                 return false;
             }
 
-            // 第 5 步（SPEC §7）：解析失败、字段缺失或 requestId 与文件名不符，都进 deadletter 而不是抛异常给宿主。
+            // 第 5 步（SPEC §9）：解析失败、字段缺失或 requestId 与文件名不符，都进 deadletter 而不是抛异常给宿主。
             string? commandText;
             if (!CourierIO.TryReadAllText(commandPath, out commandText)) return false;
             CourierCommand? command = CourierCommand.TryParse(commandText, requestId);
@@ -521,7 +631,7 @@ namespace Courier
                 return false;
             }
 
-            // 第 6 步（SPEC §7.1）：deadline 已过就 MUST NOT 执行，落 rejected/stale 并归档。
+            // 第 6 步（SPEC §9.1）：deadline 已过就 MUST NOT 执行，落 rejected/stale 并归档。
             if (DateTime.UtcNow > command.DeadlineUtc)
             {
                 WriteResultAndArchive(requestId, commandPath, CourierProtocol.StatusRejected, string.Empty, CourierProtocol.ReasonStale, false);
@@ -532,12 +642,12 @@ namespace Courier
             HandlerEntry? handler;
             if (!mHandlers.TryGetValue(key, out handler) || handler == null)
             {
-                // 第 7 步（SPEC §7）：路由在写入时确定，本端点没有这个能力就只能 rejected/unknown-action。
+                // 第 7 步（SPEC §9）：路由在写入时确定，本端点没有这个能力就只能 rejected/unknown-action。
                 WriteResultAndArchive(requestId, commandPath, CourierProtocol.StatusRejected, string.Empty, CourierProtocol.ReasonUnknownAction, false);
                 return false;
             }
 
-            // 第 8 步（SPEC §8.1）：首次认领用不覆盖语义创建，抢不到说明别人先到了，本轮跳过。
+            // 第 8 步（SPEC §10.1）：首次认领用不覆盖语义创建，抢不到说明别人先到了，本轮跳过。
             // 接管过期租约时必须覆盖写：那条 claim 文件本来就还在盘上，继续用不覆盖语义
             // 会永远写不进去，命令就卡死在 commands/ 里，attempts 也不再增长。
             DateTime now = DateTime.UtcNow;
@@ -552,7 +662,7 @@ namespace Courier
                 return false;
             }
 
-            // 第 9 步（SPEC §13.2）：把 handler 交给线程池，Tick 立刻继续往下走，不等它。
+            // 第 9 步（SPEC §16.2）：把 handler 交给线程池，Tick 立刻继续往下走，不等它。
             var source = new CancellationTokenSource();
             CancellationToken token = source.Token;
             string payloadText = command.Payload;
@@ -566,7 +676,7 @@ namespace Courier
             return true;
         }
 
-        /// <summary>SPEC §13 第 4 步：把已完成（或已超时）的 in-flight 写成终态并释放名额。</summary>
+        /// <summary>SPEC §16 第 4 步：把已完成（或已超时）的 in-flight 写成终态并释放名额。</summary>
         private void ReapInflight()
         {
             var ready = new List<InflightEntry>();
@@ -581,17 +691,17 @@ namespace Courier
 
             for (int index = 0; index < ready.Count; index++)
             {
-                // SPEC §13.2：收割路径的失败 MUST NOT 穿透 Tick。写 results 的 I/O 失败已在 Finish 内单独处理，
+                // SPEC §16.2：收割路径的失败 MUST NOT 穿透 Tick。写 results 的 I/O 失败已在 Finish 内单独处理，
                 // 这里再兜一层，防止归档或释放 CTS 时的意外把整个服务循环打死。
                 try { Finish(ready[index]); }
                 catch (Exception caught) when (IsIoFailure(caught)) { }
             }
         }
 
-        /// <summary>SPEC §13.2 的 Reap：写终态、归档、删 claim、删 progress，每一步失败都不中断其余步骤。</summary>
+        /// <summary>SPEC §16.2 的 Reap：写终态、归档、删 claim、删 progress，每一步失败都不中断其余步骤。</summary>
         private void Finish(InflightEntry entry)
         {
-            // SPEC §8.1：租约被别人接管后 MUST 放弃执行，且 MUST NOT 写 results/——
+            // SPEC §10.1：租约被别人接管后 MUST 放弃执行，且 MUST NOT 写 results/——
             // 新持有者会产出这条命令唯一的终态，我们这份结果属于已经被作废的那次执行。
             if (entry.Abandoned)
             {
@@ -608,13 +718,13 @@ namespace Courier
             {
                 if (entry.Task.IsCanceled)
                 {
-                    // SPEC §11.1：handler 采纳了取消。
+                    // SPEC §13.1：handler 采纳了取消。
                     status = CourierProtocol.StatusFailed;
                     reason = CourierProtocol.ReasonCancelled;
                 }
                 else if (entry.Task.IsFaulted)
                 {
-                    // SPEC §9.1：业务逻辑执行了但失败，是 failed 而不是 rejected；异常不得穿透到宿主。
+                    // SPEC §11.1：业务逻辑执行了但失败，是 failed 而不是 rejected；异常不得穿透到宿主。
                     Exception? error = entry.Task.Exception;
                     status = CourierProtocol.StatusFailed;
                     reason = error != null && error.GetBaseException() is OperationCanceledException
@@ -630,7 +740,7 @@ namespace Courier
             }
             else
             {
-                // SPEC §13.2 第 4 条：超 HANDLER_TIMEOUT 必须立即写终态，MUST NOT 等 handler 返回——
+                // SPEC §16.2 第 4 条：超 HANDLER_TIMEOUT 必须立即写终态，MUST NOT 等 handler 返回——
                 // 一个不响应取消的 handler 可能永远不返回，等它等于让这条命令永远没有结果。
                 status = CourierProtocol.StatusFailed;
                 reason = CourierProtocol.ReasonHandlerTimeout;
@@ -675,7 +785,7 @@ namespace Courier
         }
 
 
-        /// <summary>SPEC §13 第 5 步与 §8.1：对仍在执行的 in-flight 续约；发现租约已被接管就放弃执行。</summary>
+        /// <summary>SPEC §16 第 5 步与 §10.1：对仍在执行的 in-flight 续约；发现租约已被接管就放弃执行。</summary>
         private void RenewInflight()
         {
             List<InflightEntry> snapshot;
@@ -697,7 +807,7 @@ namespace Courier
                 if (CourierIO.TryReadAllText(claimPath, out claimText)) current = CourierClaim.TryParse(claimText);
                 if (current == null || !string.Equals(current.Owner, mEndpointId, StringComparison.Ordinal))
                 {
-                    // 租约丢了：别人已经接管，我们这次执行的结果没有资格落盘（SPEC §8.1）。
+                    // 租约丢了：别人已经接管，我们这次执行的结果没有资格落盘（SPEC §10.1）。
                     entry.Abandoned = true;
                     try
                     {
@@ -721,7 +831,7 @@ namespace Courier
             }
         }
 
-        /// <summary>SPEC §11.2 与 §13 第 7 步：终态已产生的命令，其 progress 文件必须消失。</summary>
+        /// <summary>SPEC §13.2 与 §16 第 7 步：终态已产生的命令，其 progress 文件必须消失。</summary>
         private void CleanProgress()
         {
             string[] files;
@@ -746,7 +856,7 @@ namespace Courier
 
         private void WriteResultAndArchive(string requestId, string commandPath, string status, string payload, string? reason, bool cancelRequested)
         {
-            // SPEC §12.1：先写 results 再搬命令；反过来会让命令在崩溃窗口里凭空消失。
+            // SPEC §15.1：先写 results 再搬命令；反过来会让命令在崩溃窗口里凭空消失。
             // 写失败时不归档也不删 claim：让下一轮按 attempts + 1 重来，好过把证据清掉。
             try
             {
@@ -758,7 +868,7 @@ namespace Courier
             }
 
             ArchiveCommand(requestId, commandPath);
-            // SPEC §8：终态产生后 claim 必须消失，否则观察工具会看到一条永远"正在执行"的命令。
+            // SPEC §10：终态产生后 claim 必须消失，否则观察工具会看到一条永远"正在执行"的命令。
             CourierIO.TryDelete(Path.Combine(mClaimsDirectory, requestId + CourierProtocol.JsonExtension));
             DeleteProgress(requestId);
         }
@@ -786,7 +896,7 @@ namespace Courier
             }
             catch (Exception caught) when (caught is IOException || caught is UnauthorizedAccessException)
             {
-                // SPEC §12.1：归档失败 MUST 被忽略并继续，不能因为搬不动就让整条命令重来。
+                // SPEC §15.1：归档失败 MUST 被忽略并继续，不能因为搬不动就让整条命令重来。
             }
         }
 
@@ -800,7 +910,7 @@ namespace Courier
             }
             catch (Exception caught) when (IsIoFailure(caught))
             {
-                // 写不出 deadletter 就保持原状：命令与 claim 都还在，下一轮会再次走到这里（SPEC §13.2 最后一条）。
+                // 写不出 deadletter 就保持原状：命令与 claim 都还在，下一轮会再次走到这里（SPEC §16.2 最后一条）。
                 return;
             }
 
@@ -814,7 +924,7 @@ namespace Courier
             CourierIO.TryDelete(Path.Combine(mProgressDirectory, requestId + CourierProtocol.JsonExtension));
         }
 
-        /// <summary>claim 的租约未到期即视为别人正在执行（SPEC §8.1）；claim 缺失或不可解析时返回 false，让取消立即生效。</summary>
+        /// <summary>claim 的租约未到期即视为别人正在执行（SPEC §10.1）；claim 缺失或不可解析时返回 false，让取消立即生效。</summary>
         private static bool IsClaimedByOther(string claimPath)
         {
             string? text;
@@ -825,7 +935,7 @@ namespace Courier
 
         private static bool IsClaimExpired(DateTime expiresAtUtc)
         {
-            // SPEC §8.1：租约到期且没有对应 result，持有者即视为已死。
+            // SPEC §10.1：租约到期且没有对应 result，持有者即视为已死。
             return DateTime.UtcNow > expiresAtUtc;
         }
 
@@ -835,15 +945,43 @@ namespace Courier
             return caught is IOException || caught is UnauthorizedAccessException || caught is NotSupportedException;
         }
 
+        /// <summary>状态名是否已声明（SPEC §14）。</summary>
+        private bool IsDeclaredState(string name)
+        {
+            for (int index = 0; index < mStates.Count; index++)
+            {
+                if (string.Equals(mStates[index].Name, name, StringComparison.Ordinal)) return true;
+            }
+            return false;
+        }
+
         private void ThrowIfDisposed()
         {
             if (mDisposed) throw new ObjectDisposedException(nameof(CourierNode));
+        }
+
+        private static int CompareStates(StateEntry left, StateEntry right)
+        {
+            return string.CompareOrdinal(left.Name, right.Name);
         }
 
         private static int CompareHandlers(HandlerEntry left, HandlerEntry right)
         {
             int channel = string.CompareOrdinal(left.Channel, right.Channel);
             return channel != 0 ? channel : string.CompareOrdinal(left.Action, right.Action);
+        }
+
+        /// <summary>SPEC §14：一个已声明的状态名。声明只描述"会发布什么"，值在 state/ 下按需读取。</summary>
+        private sealed class StateEntry
+        {
+            internal StateEntry(string name, string summary)
+            {
+                Name = name;
+                Summary = summary;
+            }
+
+            internal string Name { get; }
+            internal string Summary { get; }
         }
 
         private sealed class HandlerEntry
@@ -862,7 +1000,7 @@ namespace Courier
             internal Func<string, CancellationToken, Task<string>> Handler { get; }
         }
 
-        /// <summary>SPEC §13.1：一条正在执行的命令。字段只由 Tick 线程或 Dispose 改写，读写都在 mGate 之外时靠 volatile 语义的引用发布保证可见。</summary>
+        /// <summary>SPEC §16.1：一条正在执行的命令。字段只由 Tick 线程或 Dispose 改写，读写都在 mGate 之外时靠 volatile 语义的引用发布保证可见。</summary>
         private sealed class InflightEntry
         {
             internal InflightEntry(string requestId, string commandPath, DateTime deadlineUtc, CancellationTokenSource source, Task<string> task)

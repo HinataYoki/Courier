@@ -8,7 +8,7 @@ using Xunit;
 namespace Courier.Tests;
 
 /// <summary>
-/// 节点生命周期与最小正常路径（SPEC §5、§13、§14）。
+/// 节点生命周期与最小正常路径（SPEC §5、§16、§17）。
 /// </summary>
 public sealed class CourierNodeTests : TestRoot
 {
@@ -29,7 +29,7 @@ public sealed class CourierNodeTests : TestRoot
         Assert.True(Directory.Exists(Path.Combine(EndpointDirectory("worker"), CourierProtocol.ProgressDirectory)));
     }
 
-    /// <summary>SPEC §13：空队列的一轮 Tick 只写心跳，不得凭空产出 results 或 deadletter。</summary>
+    /// <summary>SPEC §16：空队列的一轮 Tick 只写心跳，不得凭空产出 results 或 deadletter。</summary>
     [Fact]
     public void Tick_没有命令_不写任何结果文件()
     {
@@ -71,7 +71,7 @@ public sealed class CourierNodeTests : TestRoot
         Assert.Throws<ArgumentNullException>(() => node.HandleAsync("document", "open", "打开文档", (Func<string, CancellationToken, Task<string>>)null!));
     }
 
-    /// <summary>SPEC §14：两端各自 Tick，调用方等待到 ok 响应。</summary>
+    /// <summary>SPEC §17：两端各自 Tick，调用方等待到 ok 响应。</summary>
     [Fact]
     public async Task Call_正常端点_返回ok且payload为handler返回值()
     {
@@ -90,7 +90,7 @@ public sealed class CourierNodeTests : TestRoot
         Assert.True(CourierProtocol.IsValidRequestId(response.RequestId));
     }
 
-    /// <summary>HandleAsync 走同一条处理管线，长命宿主 SHOULD 用它（SPEC §14.3）。</summary>
+    /// <summary>HandleAsync 走同一条处理管线，长命宿主 SHOULD 用它（SPEC §17.3）。</summary>
     [Fact]
     public async Task CallAsync_异步处理器_返回ok且payload为异步返回值()
     {
@@ -109,7 +109,7 @@ public sealed class CourierNodeTests : TestRoot
         Assert.Equal("async:main.doc", response.Payload);
     }
 
-    /// <summary>payload 是不透明字符串，空串与 null 都必须原样送达 handler（SPEC §7）。</summary>
+    /// <summary>payload 是不透明字符串，空串与 null 都必须原样送达 handler（SPEC §9）。</summary>
     [Theory]
     [InlineData("")]
     [InlineData(null)]

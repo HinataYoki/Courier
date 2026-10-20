@@ -1,6 +1,6 @@
-# Courier 协议规范 v1
+# Courier 协议规范 v2
 
-**状态**：草案（Draft）。协议版本 `1`。
+**状态**：草案（Draft）。协议版本 `2`。
 **地位**：本文是**唯一有约束力的文档**。
 **目标读者**：要实现第二份 Courier 实现的人。读完本文应当能独立写出可互操作的实现。
 
@@ -15,17 +15,30 @@
 | **服务者（server）** | 某个端点目录的**唯一**写入者：读 `commands/`、写 `results/`、维护 `claims/` 与 `heartbeat`。 |
 | **投递方（sender）** | 向某端点 `commands/` 写入命令的任意进程。可以有任意多个。 |
 | **调用方（caller）** | 投递方中"要等结果"的那一类。观察方只读不写。 |
+| **状态快照（state）** | 端点发布的只读状态，对应 `state/<name>.json`。没有请求，也没有响应。 |
+| **会话（session）** | 端点的一次运行，由 `sessionId` 唯一标识。重启即新会话，旧会话的任何结论都不代表新会话。 |
 
 本文使用 RFC 2119 措辞：**MUST / MUST NOT / SHOULD / SHOULD NOT / MAY**。
 
-**核心不变式**（其余条款都可以从这四条推出来）：
+**核心不变式**（其余条款都可以从这五条推出来）：
 
 1. **一个端点目录只有一个服务者**，但可以有任意多个投递方。
 2. **路由在写入时确定**：消息写进哪个目录，就只有该目录的服务者会处理。不存在运行期过滤。
 3. **落盘即承诺**：出现在 `commands/` 的每条命令 MUST 最终产出一个终态证据（`results/` 中的响应，或 `deadletter/` 中的记录）。MUST NOT 静默丢弃。
 4. **原子写只有一种**：同目录临时文件 → flush/close → rename。MUST NOT 直接写目标文件。
+5. **读路径与写路径分离**：请求-响应走 `commands/` → `results/`，状态发布走 `state/`。两者 MUST NOT 互相替代——把状态塞进 `commands/`，每次读就变成一次有副作用的写；把请求塞进 `state/`，它就没有终态证据。
 
-**投递语义是 at-least-once，不是 exactly-once。** 服务者崩溃、租约过期后被接管（§8.1），都可能让同一条命令被执行两次。需要恰好一次副作用的 handler 必须自己按 `requestId` 去重。协议不提供、也不假装提供 exactly-once。
+**投递语义是 at-least-once，不是 exactly-once。** 服务者崩溃、租约过期后被接管（§10.1），都可能让同一条命令被执行两次。需要恰好一次副作用的 handler 必须自己按 `requestId` 去重。协议不提供、也不假装提供 exactly-once。
+
+**三条信道，三种可靠性，不要混用**：
+
+| 信道 | 形态 | 可靠性 | 该用在什么上 |
+|---|---|---|---|
+| 请求-响应 | `commands/` → `results/` | 至少一次，有终态证据 | 有副作用、或需要回执的动作 |
+| 状态发布 | `state/<name>.json` | 最新值，无回执 | 让外界看到"现在是什么样" |
+| 快通道 | **v2 不在协议内**（§5.2） | — | — |
+
+选错信道的代价是结构性的：用状态发布传递"请执行"，会丢掉失败与重试；用请求-响应承载每秒 60 次的状态刷新，会在磁盘上写出每秒 60 个文件，还会让 `results/` 无限增长。
 
 ---
 
@@ -33,10 +46,12 @@
 
 ```
 <root>/
+├── endpoint.json                  # 可选：root 级端点清单，见 §7
 ├── endpoints/
 │   └── <endpointId>/
 │       ├── endpoint.json          # 能力目录，首次 Tick 前写完即冻结，退出不删
 │       ├── heartbeat              # 单个 UTC 时间戳，每 tick 覆盖写
+│       ├── host.lock              # 可选：单实例互斥，见 §8
 │       ├── commands/              # 投递方写
 │       │   └── <requestId>.json
 │       ├── claims/                # 服务者写（独占创建）
@@ -48,8 +63,10 @@
 │       │   └── <requestId>.json
 │       ├── cancels/               # 投递方写（可选能力）
 │       │   └── <requestId>.json
-│       └── progress/              # 服务者写（可选能力）
-│           └── <requestId>.json
+│       ├── progress/              # 服务者写（可选能力）
+│       │   └── <requestId>.json
+│       └── state/                 # 服务者写（可选能力，§14）
+│           └── <name>.json
 └── archive/
     └── <yyyy-MM-dd>/
         └── <endpointId>/
@@ -69,11 +86,16 @@
 | `endpoints/<id>/deadletter/` | 该端点服务者 | 所有人 |
 | `endpoints/<id>/cancels/` | **投递方** | 该端点服务者 |
 | `endpoints/<id>/progress/` | 该端点服务者 | 所有人 |
+| `endpoints/<id>/state/` | 该端点服务者 | 所有人 |
+| `endpoints/<id>/host.lock` | 该端点服务者 | 所有人（只读探测） |
+| `<root>/endpoint.json` | 该 root 的**目录服务者**（§6） | 所有人 |
 | `archive/` | 服务者（搬自己的）、显式授权的 GC 进程 | 所有人 |
 
 **MUST NOT**：投递方写入 `results/`、`claims/`、`deadletter/`、`progress/`、`heartbeat`、`endpoint.json`。
 **MUST NOT**：任何一方删除 `endpoints/<id>/` 目录本身（端点退出只让 heartbeat 停更）。
-**MUST NOT**：任何第三方搬动或删除 `results/`（见 §12）。
+**MUST NOT**：任何第三方搬动或删除 `results/`（见 §16）。
+**MUST NOT**：投递方写 `state/`。它是服务者单方面发布的视图，不是收件箱。
+**MUST NOT**：用 `state/` 承载有副作用或有回执需求的调用（§1）。
 
 实现 SHOULD 在启动时创建缺失的目录，并容忍已存在。
 
@@ -94,7 +116,7 @@
 - 全部是 UTC，RFC 3339 格式，以 `Z` 结尾，最多 7 位小数秒。
 - 例：`2026-10-19T13:52:43.5120000Z`。
 - 比较用 UTC 时刻，MUST NOT 用本地时间。
-- 协议假定两端系统时钟偏差小于 `deadlineUtc` 的典型值（§16）。跨机器且无 NTP 时行为未定义。
+- 协议假定两端系统时钟偏差小于 `deadlineUtc` 的典型值（§19）。跨机器且无 NTP 时行为未定义。
 
 ### 3.3 原子写（MUST）
 
@@ -123,6 +145,24 @@
 
 `commands/` 的枚举顺序 MUST 按**文件名升序**。因为 `requestId` 以定长 UTC 时间戳开头，字典序即时间序。
 
+### 3.6 路径与重解析点（MUST）
+
+实现拼出任何一个落在 root 之下的路径时，MUST 满足：
+
+1. **拼接后再校验，不是拼接前。** 用 `Path.GetFullPath` 得到绝对路径，再 `Path.GetRelativePath(root, full)` 判定：结果若是绝对路径、或等于 `..`、或以 `..` + 目录分隔符开头，即判定逃逸，MUST 拒绝。
+2. **比较前缀时必须带结尾分隔符。** 不带分隔符时 `/root/app` 会被 `/root/app-evil` 骗过。
+3. **Windows 上大小写不敏感，其余平台敏感。**
+4. **MUST 拒绝穿过重解析点（符号链接、junction、mount point）的路径。** 对 root 及其下每一段已存在的路径组件检查 `FileAttributes.ReparsePoint`，命中即拒绝；不存在的组件视为通过（它还没被创建，无从穿越）。
+5. 上述检查 MUST 在**每次**落盘前做，MUST NOT 只在启动时做一次——目录可以在运行期间被替换成链接。
+
+为什么值得这么麻烦：`endpointId`、`channel`、`action`、`state` 的名字最终都会变成路径片段。只靠正则挡不住一个已经被别人做成链接的中间目录——那不是输入的问题，是环境的问题，但后果一样：写到 root 外面去。
+
+### 3.7 读与写的责任边界
+
+- 协议的所有读取（`endpoint.json`、`heartbeat`、`results/`、`state/`、`claims/`）MUST 容忍**文件不存在**，把它当作"还没有"，MUST NOT 当作错误。
+- 协议的所有写入 MUST 是**幂等**的：同一个目标写两次，结果必须与写一次相同。这条约束让崩溃恢复变成"再跑一遍"，而不是"猜上次做到哪"。
+- 读取方 MUST NOT 因为一个字段类型不对就整体拒绝：类型不对按缺失处理（§3.1），除非该字段是 MUST 且缺失会让消息无法路由。
+
 ---
 
 ## 4. 标识符
@@ -136,19 +176,23 @@
 
 ### 4.2 requestId
 
-- 正则：`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`
-- 格式：`{yyyyMMdd}T{HHmmss}Z-{8位小写hex}`，例：`20261019T135243Z-7f3a2b1c`。
-- 随机段 MUST 存在。用自增计数器代替随机段的实现**不满足本规范**：两个进程在同一秒内投递会撞名。
+- 正则：`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8,32}$`
+- 格式：`{yyyyMMdd}T{HHmmss}Z-{8–32位小写hex}`，例：`20261019T135243Z-7f3a2b1c`。
+- 随机段 MUST 存在，长度 8–32。用自增计数器代替随机段的实现**不满足本规范**：两个进程在同一秒内投递会撞名。
+- 为什么允许更长的随机段：25 字符的定长 id 在一个高频投递的端点上每秒只有 4 G 个名字可用，这够用，但把它写死会让"想用 ULID/UUID 前缀"的调用方被迫改造。协议只约束**可解析性**与**时间序**，不约束随机段的具体宽度。
 - 时间戳部分 SHOULD 取投递时刻；服务者 MUST NOT 依赖它与 `issuedAtUtc` 一致。
 
-### 4.3 channel / action
+### 4.3 channel / action / state 名
 
-- 正则（两者相同）：`^[A-Za-z0-9_.-]{1,64}$`
+- 正则（三者相同）：`^[A-Za-z0-9_.-]{1,64}$`
 - 注册与调用时 MUST 完全一致（区分大小写）。不做大小写折叠。
+- 名字**区分大小写但 MUST 只按序数比较**，MUST NOT 做区域性比较：`document` 与 `Document` 是两个不同的 channel，`ß` 与 `SS` 无关。
+- 名字是路径片段，MUST 满足 §3.6；正则只是第一道闸。
+- 允许 `.` 是为了 `kit.action` 这类命名习惯，但 `..`、以及以 `.` 开头或结尾的名字 MUST 被拒绝——它们在路径语义上有特殊含义。
 
 ### 4.4 protocolVersion
 
-- 整数。当前为 `1`。
+- 整数。当前为 `2`。
 - **唯一的版本字段**。命令与响应里 MUST NOT 重复携带版本。
 - 投递方 MUST 在投递前读取目标 `endpoint.json` 的 `protocolVersion` 并与自身实现版本比对：不同则**本地直接失败，不写任何文件**。
 - 版本不匹配 MUST 在使用之前发现，而不是在解析失败之后。
@@ -160,18 +204,21 @@
 启动阶段写完即**冻结**，端点退出时**不删**。
 
 ```json
-{"endpointId":"app-a","description":"桌面排版工具","processId":41232,"startedAtUtc":"2026-10-19T13:50:00.0000000Z","protocolVersion":1,"actions":[{"channel":"document","action":"open","summary":"打开文档"}]}
+{"endpointId":"app-a","description":"桌面排版工具","sessionId":"7f3a2b1c","processId":41232,"startedAtUtc":"2026-10-19T13:50:00.0000000Z","protocolVersion":2,"actions":[{"channel":"document","action":"open","summary":"打开文档"}],"states":[{"name":"document","summary":"当前文档"}]}
 ```
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `endpointId` | string | MUST | 必须等于目录名 |
 | `description` | string | SHOULD | 人类可读 |
+| `sessionId` | string | MUST | 本次运行的唯一标识，每次启动换新。见下方说明 |
 | `processId` | integer | MAY | **不得用于判活** |
 | `startedAtUtc` | string | MAY | 上一次运行的值，**不得用于判活** |
 | `protocolVersion` | integer | MUST | 见 §4.4 |
 | `actions` | array | MUST | 可为空数组 |
-| `hot` | object | MAY | 快通道声明，见 §5.2 |
+| `states` | array | MAY | 状态声明，见 §14 |
+
+`sessionId` 是 8–32 位小写 hex，每次启动 MUST 换新。它的作用是让读方分辨「这是同一个端点的新一轮运行」还是「还是原来那个」——`processId` 会被 OS 复用，`startedAtUtc` 可能被复制，只有 `sessionId` 是这个实例独有的。读到 `sessionId` 变了，就 MUST 丢弃此前基于旧会话做的任何判断（例如"这个端点的某个命令一定还在跑"）。
 
 **MUST 整体原子替换，MUST NOT 增量追加。** 先构造本次运行的**完整** actions 列表再覆盖整个文件。增量追加会让上一版注册过、这一版已删除的能力永远留在文件里，形成一个永远返回 `rejected/unknown-action` 的幽灵能力。
 
@@ -187,17 +234,21 @@
 
 同一 `(channel, action)` 在一个 `endpoint.json` 内 MUST 唯一。重复注册是编程错误，服务者 MUST 在注册时直接报错。
 
-### 5.2 可选 `hot` 字段
+### 5.2 快通道：v2 不声明
 
-```json
-{"kind":"namedPipe","address":"courier-app-a-7f3a2b1c","protocol":"courier-hot/1","fallback":"file"}
-```
+v1 草案里 `hot` 字段声明了 named pipe / shared memory 快通道。**v2 删掉它。**
 
-- `kind` 取值：`namedPipe`、`sharedMemory`、`fileMapping`。
-- `fallback` MUST 为 `"file"`。
-- 缺省该字段即表示"只有文件通道"，这是**合法且常见**的形态。
-- 快通道的线格式**不在本规范范围内**。本规范只规定：声明了 `hot` 的端点，在快通道连不上、超时或 `protocol` 不匹配时 MUST 回落 `commands/`。
-- 快通道承载的调用 MUST NOT 产生 `commands/` 或 `results/` 文件，因此 MUST NOT 用于必须可审计、可重放的调用。
+理由不是「不需要」，而是**声明的快通道无法被验证**：协议里写一条 `hot`，实现完全可以忽略它、只走 `commands/`，而且不违反任何一条 MUST。一份「声明了但可能没人实现」的规范，比没有这条规范更糟——它让互操作性从「可验证」退化成「看运气」。
+
+v2 的做法是把快通道从**协议层**挪到**实现层的性能优化**：一个实现当然可以在同一台机器上把 `commands/` 落盘这一步用内存映射加速，只要它对所有观察方仍然表现为符合本规范的 `commands/` → `results/`。这不是快通道，这是快速的文件通道。
+
+重新把快通道纳入协议的前提（三条全部满足才考虑）：
+
+1. 至少有两份**独立实现**都真的实现了它，可以互相对拍。
+2. 有一条**可观测的**一致性测试能证明「走快通道」与「走文件通道」产生相同的终态证据。
+3. 协议里能写出一条**可被拒绝**的条款——即「没实现快通道」能被测出来是违规，而不是靠自觉。
+
+在那之前，`endpoint.json` 的 `hot` 字段 **MUST NOT 出现**。读到它的实现 MUST 忽略它（向前兼容：未来版本可能重新引入）。
 
 ---
 
@@ -216,13 +267,52 @@
 - 心跳 MUST NOT 塞进 `endpoint.json`：那会让每次心跳重写能力目录，既浪费又破坏"写一次"的语义。
 - 心跳 MUST 用覆盖写，MUST NOT 追加，避免无限增长。
 
-**心跳的含义是"服务循环还活着"，不是"某个 handler 正在跑"。** handler 在服务者内部执行（§13.1），执行期间服务循环 MUST 继续按宿主节奏 `Tick`，心跳照常更新。一个跑了 20 秒的 handler MUST NOT 让端点显示成 `dead`——观察方看到 `dead` 就应当认为这个端点再也处理不了任何命令，而不是"它很忙"。
+**心跳的含义是"服务循环还活着"，不是"某个 handler 正在跑"。** handler 在服务者内部执行（§16.1），执行期间服务循环 MUST 继续按宿主节奏 `Tick`，心跳照常更新。一个跑了 20 秒的 handler MUST NOT 让端点显示成 `dead`——观察方看到 `dead` 就应当认为这个端点再也处理不了任何命令，而不是"它很忙"。
 
 换句话说：**心跳不能由 handler 的进度决定。** 如果心跳只在"一轮 Tick 从头跑到尾"之后才更新，那么任何慢 handler 都会把端点自己判死，而杀死它的正是它自己。
 
 ---
 
-## 7. `command`
+## 7. 注册表 `endpoint.json`（root 级，可选）
+
+路径：`<root>/endpoint.json`。与端点自己的 `<root>/endpoints/<id>/endpoint.json` 同名但**不同文件、不同含义**。
+
+这一份是 **root 级的端点清单**：让没有目录列举能力的观察方一次读到「这个 root 下现在有哪些端点」。
+
+```json
+{"protocolVersion":2,"generatedAtUtc":"2026-10-19T13:52:53.9000000Z","endpoints":[
+  {"endpointId":"app-a","description":"主编辑器","sessionId":"7f3a2b1c","state":"alive"},
+  {"endpointId":"app-b","description":"","sessionId":"9c1d4e5f","state":"dead"}
+]}
+```
+
+- 由**目录服务者**维护：MUST 整体原子替换（§3.3），MUST NOT 增量追加。
+- 条目 MUST 按 `endpointId` 序数升序。
+- `state` 是快照值，允许过期；读方 MUST NOT 把它当作权威，需要权威时读端点自己的 `heartbeat`（§6）。
+- 该文件**可选**。没有它，观察方 MUST 退化为列举 `endpoints/` 目录——这是本规范的首选路径，注册表只是为了照顾不能列目录的宿主。
+- 注册表 MUST NOT 被当作「端点存活」的唯一依据：一个端点可能刚启动还没被登记，也可能刚崩溃还没被移除。**权威永远是端点自己写的 `heartbeat`。**
+
+为什么降级为可选：FileBridge 的 `engine.json` 是必需的，因为它的宿主（Unity 编辑器）里观察方常常只有一个路径、不能列目录。Courier 不假设宿主有这个限制，所以把它做成可选的加速手段，而不是协议的地基。
+
+---
+
+## 8. `host.lock`（单实例互斥，可选）
+
+路径：`endpoints/<endpointId>/host.lock`。
+
+一个端点目录只能有一个服务者（§1 不变式 1）。如果宿主可能被启动两次（用户双击两次、编辑器重复加载插件），需要一把 OS 级的锁来拒绝第二个实例。
+
+- 服务者启动时 MUST 以 `FileMode.OpenOrCreate` + `FileShare.None` 打开 `host.lock` 并**持有到退出**。
+- 拿不到锁时 MUST 判定为「该端点已被另一个实例服务」，MUST NOT 继续初始化目录。
+- 只有 OS 明确报告的**共享冲突**才算「已被占用」：Windows 上 `HResult & 0xFFFF` 等于 `32`（`ERROR_SHARING_VIOLATION`）或 `33`（`ERROR_LOCK_VIOLATION`）。磁盘故障、权限不足、路径不存在 MUST NOT 被伪装成「已有实例」——那会让一个坏掉的磁盘看起来像「程序已经在跑了」，用户永远等不到它启动。
+- 文件内容无意义，可写任意字节（包括空）。锁的语义完全来自 OS 的共享模式，不来自文件内容。
+- 该文件**可选**。没有它，协议不提供任何单实例保证，两个服务者会互相踩。
+
+为什么用 OS 锁而不是 PID 文件：PID 文件需要判断「那个 PID 还活着吗」，而这个判断在 PID 复用、容器、跨用户场景下都不可靠。OS 文件锁由内核维护，进程死亡时自动释放——这正是我们需要的语义，且不需要任何心跳或超时来猜。
+
+---
+
+## 9. `command`
 
 路径：`endpoints/<targetId>/commands/<requestId>.json`。文件名即 `requestId`。
 
@@ -237,23 +327,23 @@
 | `action` | string | MUST | §4.3 |
 | `payload` | string | MUST | **不透明字符串**。Courier 从不解析。可为空串 |
 | `issuedAtUtc` | string | MUST | 投递时刻 |
-| `deadlineUtc` | string | MUST | 见 §7.1 |
+| `deadlineUtc` | string | MUST | 见 §9.1 |
 | `issuedBy` | string | SHOULD | 投递方端点 id。**不参与路由**，只用于审计与回信。**不是凭据** |
 
-### 7.1 deadlineUtc
+### 9.1 deadlineUtc
 
 - 服务者取走命令时若 `now > deadlineUtc`，MUST NOT 执行，直接写 `rejected/stale` 并归档。
 - 目的：防止"软件关了两小时后开机，执行一堆陈旧命令"。
-- 投递方 MUST 用 `issuedAtUtc + deadline` 生成该字段，其中 `deadline` 默认 `DEFAULT_DEADLINE`（10 s，§16），可由调用方按次覆盖（§14.2），但 MUST NOT 超过 `MAX_DEADLINE`（默认 300 s）。超过时按 `MAX_DEADLINE` 截断，MUST NOT 报错。
+- 投递方 MUST 用 `issuedAtUtc + deadline` 生成该字段，其中 `deadline` 默认 `DEFAULT_DEADLINE`（10 s，§19），可由调用方按次覆盖（§17.2），但 MUST NOT 超过 `MAX_DEADLINE`（默认 300 s）。超过时按 `MAX_DEADLINE` 截断，MUST NOT 报错。
 - 为什么要有上限：`deadlineUtc` 是"这条命令最晚可以开始执行"的时刻，不是"最晚必须完成"。一个 300 s 的 deadline 意味着命令可以在队列里躺五分钟才被处理。没有上限时，一次误传的极大值就能让一条命令在磁盘上存活到下一次重启。
 
-### 7.2 大小上限
+### 9.2 大小上限
 
 - 命令文件总字节数 MUST ≤ `MAX_COMMAND_FILE_BYTES`（默认 1 MiB + 4 KiB）。
 - 服务者 MUST **先看文件长度再决定是否读入内存**。超限直接 `deadletter/`，MUST NOT 把内容读进内存。
 - 没有这条上限时，一条巨大命令会在任何校验发生之前耗尽服务者内存。
 
-### 7.3 投递方的前置检查（MUST）
+### 9.3 投递方的前置检查（MUST）
 
 写入前，投递方 MUST 依次检查：
 
@@ -265,7 +355,7 @@
 
 ---
 
-## 8. `claims/`
+## 10. `claims/`
 
 路径：`endpoints/<id>/claims/<requestId>.json`。
 
@@ -278,11 +368,11 @@
 - **重试计数 MUST 写在这里，MUST NOT 写进命令文件。** 命令是投递方的产物，服务者改它等于篡改来信。
 - 处理结束后 MUST 删除 claim。
 
-### 8.1 claim 是一个租约
+### 10.1 claim 是一个租约
 
 claim 不是"我领了这条命令"的记号，而是一个**有到期时刻的租约**：`expiresAtUtc` 之前，别的服务循环看到它就必须退让；`expiresAtUtc` 之后，它自动失效。
 
-- 认领时 MUST 写 `expiresAtUtc = now + CLAIM_WINDOW`（默认 `CLAIM_WINDOW = 10 s`，§16）。
+- 认领时 MUST 写 `expiresAtUtc = now + CLAIM_WINDOW`（默认 `CLAIM_WINDOW = 10 s`，§19）。
 - 认领方 MUST 在 handler 执行期间**续约**：每 `CLAIM_RENEW_INTERVAL`（默认 2 s）把 `expiresAtUtc` 推到 `now + CLAIM_WINDOW`，原子覆盖。
 - 续约 MUST 只在租约仍然属于自己时进行：重读 claim，若 `owner` 不是自己或文件已消失，说明租约已被别人接管，MUST **立即放弃执行**，MUST NOT 写 `results/`。
 - 租约过期且没有对应 result，视为持有者已死，别的服务循环可以接管并 `attempts + 1`。
@@ -294,7 +384,7 @@ claim 不是"我领了这条命令"的记号，而是一个**有到期时刻的�
 
 ---
 
-## 9. `response`
+## 11. `response`
 
 路径：`endpoints/<id>/results/<requestId>.json`。
 
@@ -308,9 +398,9 @@ claim 不是"我领了这条命令"的记号，而是一个**有到期时刻的�
 | `status` | string | MUST | `ok` / `rejected` / `failed` |
 | `payload` | string | MAY | 成功时的结果；不透明字符串 |
 | `completedAtUtc` | string | MUST | |
-| `reason` | string | 条件必填 | `status != ok` 时 MUST 出现，见 §15 |
+| `reason` | string | 条件必填 | `status != ok` 时 MUST 出现，见 §18 |
 
-### 9.1 三种落盘状态
+### 11.1 三种落盘状态
 
 | 值 | 含义 | 调用方应做什么 |
 |---|---|---|
@@ -320,16 +410,16 @@ claim 不是"我领了这条命令"的记号，而是一个**有到期时刻的�
 
 **`rejected` 与 `failed` MUST 分开。** 混成一个值，调用方无法决定是改参数还是重试。
 
-### 9.2 调用方合成的两种结果（不落盘）
+### 11.2 调用方合成的两种结果（不落盘）
 
 | 值 | 何时 | 说明 |
 |---|---|---|
 | `unreachable` | 等到超时仍无 response | 对端未启动、已崩溃或从未处理。**没有文件可读**，因为它不是任何一方的答复 |
-| `rejected/backpressure` | 投递前 `commands/` 超阈值 | 见 §7.3 |
+| `rejected/backpressure` | 投递前 `commands/` 超阈值 | 见 §9.3 |
 
 ---
 
-## 10. `deadletter/`
+## 12. `deadletter/`
 
 路径：`endpoints/<id>/deadletter/<requestId>.json`。
 
@@ -339,19 +429,19 @@ claim 不是"我领了这条命令"的记号，而是一个**有到期时刻的�
 
 进 `deadletter/` 的情形（MUST 全部覆盖）：
 
-1. 命令文件超过大小上限（§7.2）。
+1. 命令文件超过大小上限（§9.2）。
 2. 命令 JSON 解析失败、必填字段缺失、`requestId` 与文件名不一致。
 3. `attempts` 超过 `MAX_ATTEMPTS`（默认 3）。
 
-进入 deadletter 后 MUST 同时归档原命令文件（§12），MUST 删除对应 claim。
+进入 deadletter 后 MUST 同时归档原命令文件（§15），MUST 删除对应 claim。
 
 **deadletter 是终态证据。** 有它的命令不算静默丢弃，这是 §1 不变式 3 的兜底。
 
 ---
 
-## 11. `cancels/` 与 `progress/`（可选能力）
+## 13. `cancels/` 与 `progress/`（可选能力）
 
-### 11.1 cancels
+### 13.1 cancels
 
 路径：`endpoints/<id>/cancels/<requestId>.json`，由**投递方**写。
 
@@ -365,11 +455,11 @@ claim 不是"我领了这条命令"的记号，而是一个**有到期时刻的�
 - 响应仍只有 `ok`/`rejected`/`failed` 三种，MUST NOT 引入第四种终态。
 - 取消是**尽力而为**，不是保证。协议不承诺"发出 cancel 后 handler 一定停止"。
 
-**这条能力成立的前提是 §13.1：`Tick` 不被 handler 阻塞。** 如果 `Tick` 在 handler 返回之前不返回，那么"每个 Tick 检查 cancels/"就退化成"handler 跑完之前永远不检查"——取消文件只能等 handler 自己结束才被发现，等于没有取消。实现 MUST 让 handler 与 `Tick` 并发推进，并且 MUST 把 `CancellationToken` 传进 handler。
+**这条能力成立的前提是 §16.1：`Tick` 不被 handler 阻塞。** 如果 `Tick` 在 handler 返回之前不返回，那么"每个 Tick 检查 cancels/"就退化成"handler 跑完之前永远不检查"——取消文件只能等 handler 自己结束才被发现，等于没有取消。实现 MUST 让 handler 与 `Tick` 并发推进，并且 MUST 把 `CancellationToken` 传进 handler。
 
 handler 收到取消后有两种合规做法：抛 `OperationCanceledException`（→ `failed/cancelled`），或者自行收尾返回 `ok`（→ `ok` + `cancelRequested:true`）。两种都合法，区别只是"取消来得及"还是"来不及"。
 
-### 11.2 progress
+### 13.2 progress
 
 路径：`endpoints/<id>/progress/<requestId>.json`，由服务者**覆盖写**。
 
@@ -383,9 +473,46 @@ handler 收到取消后有两种合规做法：抛 `OperationCanceledException`�
 
 ---
 
-## 12. 归档与 GC
+## 14. `state/`：状态发布（可选能力）
 
-### 12.1 归档（MUST）
+路径：`endpoints/<id>/state/<name>.json`，由**服务者**覆盖写，`<name>` 遵循 §4.3。
+
+```json
+{"name":"document","revision":42,"updatedAtUtc":"2026-10-19T13:52:53.9000000Z","payload":{"activeTab":"Main.doc","dirty":true}}
+```
+
+- `revision` MUST 单调递增（同一端点内），从 1 开始。它不是版本号，是「这个端点第几次发布这个状态」。
+- `payload` 不透明，可以是任意 JSON 值（对象、数组、字符串、数字、布尔、null）。协议不解释它。
+- 读者永远看到**最新值**：没有历史、没有回执、没有终态证据。读到旧值不算错误；读到 `revision` 倒退才说明有第二个写者（§2 所有权）。
+- 读方 MUST 容忍文件不存在（§3.7）：不存在等于「这个端点还没发布过这个状态」，不是「状态是空」。
+- 状态名 MUST 在 `endpoint.json` 的 `states` 数组里声明过，投递方 MUST NOT 猜测未声明的状态名。声明格式：`{"name":"document","summary":"当前文档"}`。
+- 状态 MUST NOT 承载有副作用的操作（§1 不变式 5）。想「让对端做点什么」就走 `commands/`。
+
+### 14.1 什么时候用 state 而不是 command
+
+| 需求 | 用哪个 | 为什么 |
+|---|---|---|
+| 读当前文档路径 | `state/document` | 没有副作用，读多少次都一样 |
+| 打开一个文档 | `commands/` + `document/open` | 有副作用，需要终态证据 |
+| 编辑器帧率、内存占用 | `state/telemetry` | 高频覆盖写，旧值无意义 |
+| 导出 PDF | `commands/` + `document/export` | 长任务，需要进度与取消 |
+| 插件是否已加载 | `state/plugins` | 读侧只关心当前值 |
+
+判据只有一条：**这次交互需要「谁在什么时候得到了什么结论」吗？** 需要就是请求-响应，不需要就是状态发布。
+
+### 14.2 与 FileBridge `snapshots/` 的对应
+
+FileBridge 的 `snapshots/<kit>.json` 是各 Kit 自己写的状态快照，`ReadSnapshot<T>()` 读最新值。v2 的 `state/<name>.json` 就是它的协议化：
+
+- 名字从「Kit 名」推广成「任意 state 名」，因为 Courier 不假设调用方知道对方内部是怎么分模块的。
+- 增加 `revision`，让读方能分辨「读到了新值」与「还是刚才那个值」——FileBridge 靠 `updatedAtUtc` 猜，但同一毫秒内两次发布就分辨不出来。
+- 增加 `endpoint.json` 的 `states` 声明，让读方知道该期待哪些名字，而不是硬编码字符串。
+
+---
+
+## 15. 归档与 GC
+
+### 15.1 归档（MUST）
 
 命令产生终态后，服务者 MUST 把命令文件移动到：
 
@@ -400,9 +527,9 @@ deadletter 同理移动到 `archive/<yyyy-MM-dd>/<endpointId>/deadletter/`（可
 - 顺序 MUST 是：**先写 results（或 deadletter），再移动命令**。反过来会在崩溃时丢证据。
 - 移动失败（如目标已存在）MUST 忽略并继续；下一个 tick 会因"results 已存在"而幂等跳过。
 
-### 12.2 results 的 GC（MUST）
+### 15.2 results 的 GC（MUST）
 
-`results/` **MUST NOT 被第三方搬动或删除**——它是幂等检查（§8.1）的唯一依据。搬走等于让重放检查失效，会导致已成功的命令被重新执行。
+`results/` **MUST NOT 被第三方搬动或删除**——它是幂等检查（§10.1）的唯一依据。搬走等于让重放检查失效，会导致已成功的命令被重新执行。
 
 只有服务者自己可以清理，且 MUST 按以下顺序：
 
@@ -411,14 +538,14 @@ deadletter 同理移动到 `archive/<yyyy-MM-dd>/<endpointId>/deadletter/`（可
 
 这样读者看到 gc.json 就知道"某时间点之前的结果已被回收"，而不是误判为"从没处理过"。
 
-### 12.3 archive 的保留
+### 15.3 archive 的保留
 
-- `archive/` 是唯一允许删除的位置（§12.1、§19）。
+- `archive/` 是唯一允许删除的位置（§15.1、§22）。
 - 保留策略由实现决定（建议按日期目录整目录删除），MUST 有界。
 
 ---
 
-## 13. 服务者处理循环（`Tick`）
+## 16. 服务者处理循环（`Tick`）
 
 `Tick` 是一个**非阻塞的泵**：它把命令从队列里推进到"执行中"，把执行完的收回来写成终态，然后立刻返回。它 MUST NOT 等任何 handler 跑完。
 
@@ -437,7 +564,7 @@ Tick():
 
 `Tick` MUST 是可重入的安全点：每次调用要么把某条命令推进到"执行中"，要么写出一条终态，要么什么都不做。**它 MUST NOT 因为某条命令执行得久而阻塞。**
 
-### 13.1 handler 与 Tick 并发推进
+### 16.1 handler 与 Tick 并发推进
 
 handler 在 `Tick` 之外执行（线程池、异步任务，或宿主自己的执行器），`Tick` 只负责启动与收割。
 
@@ -447,9 +574,9 @@ handler 在 `Tick` 之外执行（线程池、异步任务，或宿主自己的�
 - **MUST NOT 并发调用 `Tick`。** 两个线程同时 Tick 会同时看到"无 result、无 claim"，然后各写一次，破坏 claim 的独占语义。这条约束无法在运行时便宜地检测，只能写成规则并由实现声明。
 - `Tick` 的单次工作量 MUST 有界：至多启动 `MAX_TICK_BATCH` 条、至多收割当前 in-flight 数。
 
-**为什么必须这样设计。** 如果 `Tick` 同步跑完 handler 再返回，会同时坏掉三件事：心跳（§6）在 handler 执行期间不更新，慢 handler 把端点自己判死；取消（§11.1）只在 Tick 开头检查，而 handler 运行期间根本进不了 Tick，取消永远送不到；claim 租约（§8.1）无法续约，任何超过 `CLAIM_WINDOW` 的 handler 都会被别的循环接管、并行执行两次。这三件事不是三个独立的 bug，是同一个设计错误的三个症状：**把"推进队列"和"执行任务"绑在同一根线程上**。
+**为什么必须这样设计。** 如果 `Tick` 同步跑完 handler 再返回，会同时坏掉三件事：心跳（§6）在 handler 执行期间不更新，慢 handler 把端点自己判死；取消（§13.1）只在 Tick 开头检查，而 handler 运行期间根本进不了 Tick，取消永远送不到；claim 租约（§10.1）无法续约，任何超过 `CLAIM_WINDOW` 的 handler 都会被别的循环接管、并行执行两次。这三件事不是三个独立的 bug，是同一个设计错误的三个症状：**把"推进队列"和"执行任务"绑在同一根线程上**。
 
-### 13.2 单条命令的启动与收割
+### 16.2 单条命令的启动与收割
 
 启动（`Start(requestId)`）：
 
@@ -481,18 +608,18 @@ handler 在 `Tick` 之外执行（线程池、异步任务，或宿主自己的�
 - 收割路径 MUST 用 `try/catch` 包住每一步 I/O，MUST NOT 让一个 `IOException` 穿透 `Tick` 把整个服务循环打死。
 - 但**写 `results/` 失败是一个例外：此时 MUST NOT 归档命令、MUST NOT 删 claim**。命令留在 `commands/`、claim 留到租约到期，下一轮按 `attempts + 1` 重来。先归档再删 claim 会让这条命令连证据一起消失——那才是真正不可恢复的丢件（§1 不变式 3）。宁可重做一次，不可无凭据地丢掉。
 
-**HANDLER_TIMEOUT 的默认值是命令的剩余 deadline。** 也就是说，一条命令从投递到产出终态，最迟不超过它自己的 `deadlineUtc`——这与 §7.1 的语义一致：deadline 既是"最晚开始执行"，也是"最晚可以有结果"。实现 MAY 配置更短的 handler 时限。
+**HANDLER_TIMEOUT 的默认值是命令的剩余 deadline。** 也就是说，一条命令从投递到产出终态，最迟不超过它自己的 `deadlineUtc`——这与 §9.1 的语义一致：deadline 既是"最晚开始执行"，也是"最晚可以有结果"。实现 MAY 配置更短的 handler 时限。
 
 ---
 
-## 14. 投递方语义
+## 17. 投递方语义
 
-### 14.1 投递
+### 17.1 投递
 
 - MUST 原子写（§3.3），MUST 不覆盖。
-- MUST 在写入前完成 §7.3 的三项检查。
+- MUST 在写入前完成 §9.3 的三项检查。
 
-### 14.2 等待终态
+### 17.2 等待终态
 
 调用方 MUST 按下述顺序判定，且 MUST 在 `timeout` 内完成：
 
@@ -503,19 +630,19 @@ handler 在 `Tick` 之外执行（线程池、异步任务，或宿主自己的�
 - MUST NOT 无限等待。
 - MUST NOT 在等待期间删除或修改命令文件（它属于服务者的处理流程）。
 
-### 14.3 互调死锁（实现约束）
+### 17.3 互调死锁（实现约束）
 
 **调用方**（`Call`/`CallAsync` 的使用者）MUST 使用非阻塞等待（异步/让出线程），MUST NOT 在驱动 `Tick` 的线程上同步阻塞等待另一个端点。同步阻塞只在没有 `Tick` 循环的短命进程（CLI）上安全。
 
 **handler 内部 MUST NOT 同步等待另一个端点。** 这条规则把调用链深度限制为 1，从结构上排除 A→B→C→A 环。
 
-§13.1 之后 `Tick` 本身不再被 handler 阻塞，所以这条规则的理由变了——但结论没变。现在的风险不是"Tick 停了"，而是**在途名额被等待中的 handler 占满**：`MAX_INFLIGHT`（默认 4）是个很小的数，四个 handler 各自阻塞等待另一个端点，这个端点就再也启动不了第五条命令。它不会死锁整个进程，但会让端点对外表现为"活着但什么都不做"——比崩溃更难诊断。
+§16.1 之后 `Tick` 本身不再被 handler 阻塞，所以这条规则的理由变了——但结论没变。现在的风险不是"Tick 停了"，而是**在途名额被等待中的 handler 占满**：`MAX_INFLIGHT`（默认 4）是个很小的数，四个 handler 各自阻塞等待另一个端点，这个端点就再也启动不了第五条命令。它不会死锁整个进程，但会让端点对外表现为"活着但什么都不做"——比崩溃更难诊断。
 
 异步 handler 在 `await` 另一个端点时同样占着名额，只是不占线程。需要长链路协作的宿主 MUST 自行调大 `MAX_INFLIGHT`，或者把协作拆成两次独立投递。
 
 ---
 
-## 15. 原因码总表
+## 18. 原因码总表
 
 | status | reason | 谁产生 | 含义 |
 |---|---|---|---|
@@ -534,14 +661,14 @@ handler 在 `Tick` 之外执行（线程池、异步任务，或宿主自己的�
 
 ---
 
-## 16. 参数与默认值
+## 19. 参数与默认值
 
 | 参数 | 默认值 | 可配置 | 约束 |
 |---|---|---|---|
-| `PROTOCOL_VERSION` | `1` | MUST NOT | 提升版本需要新文档 |
+| `PROTOCOL_VERSION` | `2` | MUST NOT | 提升版本需要新文档 |
 | `HEARTBEAT_ALIVE` | 5 s | MAY | 必须 < `HEARTBEAT_DEAD` |
 | `HEARTBEAT_DEAD` | 15 s | MAY | |
-| `DEFAULT_DEADLINE` | 10 s | MAY | 按调用可覆盖（§7.1） |
+| `DEFAULT_DEADLINE` | 10 s | MAY | 按调用可覆盖（§9.1） |
 | `MAX_DEADLINE` | 300 s | MAY | 调用方给的 `deadline` 超过此值时截断 |
 | `CLAIM_WINDOW` | 10 s | MAY | 租约长度；MUST > `CLAIM_RENEW_INTERVAL` 的两倍 |
 | `CLAIM_RENEW_INTERVAL` | 2 s | MAY | 续约间隔；MUST < `CLAIM_WINDOW` |
@@ -552,10 +679,13 @@ handler 在 `Tick` 之外执行（线程池、异步任务，或宿主自己的�
 | `MAX_TICK_BATCH` | 16 | MAY | ≥ 1；单轮最多**启动**多少条 |
 | `MAX_COMMANDS_BACKPRESSURE` | 4096 | MAY | 投递方判定 |
 | `DEFAULT_TICK_INTERVAL` | 200 ms | MAY | 由宿主决定，协议不强制 |
+| `MAX_STATE_BYTES` | 1 MiB | MAY | 状态文件上限，超出 MUST 拒写 |
+| `MAX_STATE_NAMES` | 256 | MAY | 单个端点声明的状态名上限 |
+| `HOST_LOCK_TIMEOUT` | 0（立即） | MAY | 拿 `host.lock` 的等待上限 |
 
 ---
 
-## 17. 安全要求
+## 20. 安全要求
 
 1. **不做鉴权。能写这个目录的进程就是可信的。** `issuedBy` 只用于审计与回信，不是凭据。
 2. **`endpointId` 校验是强制的**（§4.1），这是唯一的路径拼接入口。
@@ -563,72 +693,84 @@ handler 在 `Tick` 之外执行（线程池、异步任务，或宿主自己的�
 4. **root SHOULD NOT 位于云同步目录**（OneDrive / Dropbox / iCloud）。同步客户端会在 rename 前后插入干扰，直接破坏 §3.3 的原子性。
 5. **payload 不透明**。Courier MUST NOT 解析或校验 payload 内容；业务校验在 handler 里做。
 6. **必须有 DoS 上限**：`MAX_TICK_BATCH`、`MAX_COMMAND_FILE_BYTES`、`MAX_COMMANDS_BACKPRESSURE` 全部生效。
-7. **快通道引入文件系统之外的信任边界**。命名管道没有"能写这个目录才可信"的等价机制，同机任何进程都能连那个管道名。声明 `hot` 的端点 MUST 自行校验调用方，或只暴露无需鉴权的只读状态。
+7. **一旦重新引入快通道（§5.2），信任边界会跟着变**。命名管道没有"能写这个目录才可信"的等价机制，同机任何进程都能连那个管道名。重新引入时必须同时定义它的鉴权模型，不能默认继承文件系统的权限。
 
 ---
 
-## 18. 一致性清单
+## 21. 一致性清单
 
-一份实现要声称"符合 Courier v1"，下列每一条都必须是可验证的：
+一份实现要声称"符合 Courier v2"，下列每一条都必须是可验证的：
 
 **编码与原子性**
 - [ ] 所有写入走"同目录临时文件 → flush → rename"（§3.3）
 - [ ] 命令与 claim 用不覆盖语义创建（§3.3）
 - [ ] 读 JSON 对 `IOException` 有界重试（§3.4）
 - [ ] JSON 忽略未知字段（§3.1）
+- [ ] 拼出的路径不逃逸 root，且不穿过重解析点（§3.6）
+- [ ] 读缺失的文件当作「还没有」而不是错误（§3.7）
 
 **标识与版本**
 - [ ] `endpointId` 非法时拒绝启动（§4.1）
 - [ ] `requestId` 含随机段（§4.2）
 - [ ] 版本不匹配时投递方不写任何文件（§4.4）
+- [ ] `sessionId` 每次启动换新（§5）
+- [ ] 名字只按序数比较，拒绝 `..` 与首尾点（§4.3）
 
 **路由与所有权**
 - [ ] 投递方从不写 `results/`、`claims/`、`heartbeat`（§2）
 - [ ] 端点退出不删目录（§2、§6）
+- [ ] 投递方从不写 `state/`（§2、§14）
+- [ ] `state/` 只承载无副作用的最新值，没有历史也没有回执（§14）
+- [ ] 若提供 root 注册表，它是整体原子替换且按 `endpointId` 升序（§7）
+- [ ] 若提供 `host.lock`，只有共享冲突被判为「已被占用」，磁盘与权限故障不被伪装成竞争（§8）
 
 **生命周期**
 - [ ] 每条命令最终产出 results 或 deadletter（§1 不变式 3）
-- [ ] claim 过期后先查 results 再重做（§8、§13）
-- [ ] 续约失败（租约被接管）时放弃执行且不写 `results/`（§8.1）
-- [ ] `attempts` 记在 claim 而非命令里（§8）
-- [ ] 超过 `deadlineUtc` 的命令不执行（§7.1）
-- [ ] 超限命令先看大小再读（§7.2）
-- [ ] 归档顺序是"先写结果，后移命令"（§12.1）
-- [ ] `results/` 不被第三方搬动，GC 先写墓碑（§12.2）
+- [ ] claim 过期后先查 results 再重做（§10、§16）
+- [ ] 续约失败（租约被接管）时放弃执行且不写 `results/`（§10.1）
+- [ ] `attempts` 记在 claim 而非命令里（§10）
+- [ ] 超过 `deadlineUtc` 的命令不执行（§9.1）
+- [ ] 超限命令先看大小再读（§9.2）
+- [ ] 归档顺序是"先写结果，后移命令"（§15.1）
+- [ ] `results/` 不被第三方搬动，GC 先写墓碑（§15.2）
+- [ ] 状态文件超过 `MAX_STATE_BYTES` 时拒写而非截断（§14、§19）
 
 **语义**
-- [ ] `rejected` 与 `failed` 严格分开（§9.1）
-- [ ] `unreachable` 不落盘（§9.2）
-- [ ] 只使用 §15 的原因码
-- [ ] `Tick` 不并发（§13）
+- [ ] `rejected` 与 `failed` 严格分开（§11.1）
+- [ ] `unreachable` 不落盘（§11.2）
+- [ ] 只使用 §18 的原因码
+- [ ] `Tick` 不并发（§16）
 
 **并发模型**
-- [ ] `Tick` 不等 handler，慢 handler 期间心跳照常更新（§6、§13.1）
-- [ ] handler 收到 `CancellationToken`，取消能在 handler 执行期间送达（§11.1）
-- [ ] 在途 handler 续约 claim，租约不假过期（§8.1）
-- [ ] 在途数量受 `MAX_INFLIGHT` 限制（§13.1）
-- [ ] 超过 `HANDLER_TIMEOUT` 立即写 `failed/handler-timeout`，不等 handler 返回（§13.2）
-- [ ] 收割路径的 I/O 失败不穿透 `Tick`（§13.2）
+- [ ] `Tick` 不等 handler，慢 handler 期间心跳照常更新（§6、§16.1）
+- [ ] handler 收到 `CancellationToken`，取消能在 handler 执行期间送达（§13.1）
+- [ ] 在途 handler 续约 claim，租约不假过期（§10.1）
+- [ ] 在途数量受 `MAX_INFLIGHT` 限制（§16.1）
+- [ ] 超过 `HANDLER_TIMEOUT` 立即写 `failed/handler-timeout`，不等 handler 返回（§16.2）
+- [ ] 收割路径的 I/O 失败不穿透 `Tick`（§16.2）
 - [ ] 第一次 `Tick` 之后再注册能力被拒绝（§5）
 
 **互操作**
-- [ ] 与另一份实现双向对拍：命令、响应、死信、取消、进度格式完全一致
+- [ ] 与另一份实现双向对拍：命令、响应、死信、取消、进度、状态格式完全一致
+- [ ] 读方在对方没实现可选能力（`state/`、注册表、`host.lock`、cancels、progress）时行为正确退化
 
 ---
 
-## 19. 非目标（明确不做，实现 MUST NOT 自行扩展）
+## 22. 非目标（明确不做，实现 MUST NOT 自行扩展）
 
-下列能力不属于 Courier v1。实现 MUST NOT 以"可选"名义引入。
+下列能力不属于 Courier v2。实现 MUST NOT 以"可选"名义引入。
 
 1. 网络传输。跨机器请挂载共享目录。
 2. 多写者事务、分布式一致性。
-3. 高频数据面（> 约 100 msg/s）。数据面由端点自行声明的快通道承担（§5.2），Courier 只记录声明。
-4. 鉴权。能写这个目录的进程即视为可信（§17 第 1 条）。
+3. **协议层的快通道**（named pipe / shared memory / file mapping）。理由与重新引入的前提见 §5.2。文件通道之外的加速属于实现自由，不属于协议。
+4. 鉴权。能写这个目录的进程即视为可信（§20 第 1 条）。
 5. payload 的 schema 校验。payload 对 Courier 是不透明字符串。
 6. MCP 适配层。与 MCP 是替代关系。
 7. 跨语言 SDK 统一化。正式实现只有 C#，其余语言走 CLI 或 stdio 助手。
 8. 绑定任何宿主框架类型。
 9. 传输抽象层（如 `IMessageTransport`）。
 10. 消息过滤与订阅。收件人在写入时由目录确定（§2 不变式 2）。
-11. 注册中心与服务发现协议。`endpoints/` 目录即名单。
+11. **中心化的服务发现**。root 级 `endpoint.json`（§7）是可选的缓存视图，不是注册中心：它不参与路由，也不被信任为存活依据。`endpoints/` 目录才是名单。
+12. 状态订阅与变更通知。`state/` 只提供"读最新值"，不提供"值变了告诉我"。轮询是唯一被规范的方式。
+13. 恰好一次投递。见 §1 的 at-least-once 说明。
 

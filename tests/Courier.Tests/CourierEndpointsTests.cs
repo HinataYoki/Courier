@@ -8,7 +8,7 @@ using Xunit;
 namespace Courier.Tests;
 
 /// <summary>
-/// 端点目录与协议文件格式（SPEC §5、§6、§7、§12.1、§13）。
+/// 端点目录与协议文件格式（SPEC §5、§6、§9、§15.1、§16）。
 /// </summary>
 public sealed class CourierEndpointsTests : TestRoot
 {
@@ -87,7 +87,85 @@ public sealed class CourierEndpointsTests : TestRoot
 
         Assert.Equal("打开文档", Assert.Single(endpoints[0].Actions).Summary);
         Assert.Empty(endpoints[1].Actions);
-        Assert.Null(endpoints[0].Hot);
+        Assert.Empty(endpoints[0].States);
+    }
+
+    /// <summary>SPEC §5：sessionId 是每次启动换新的 8–32 位小写 hex，两个端点各不相同。</summary>
+    [Fact]
+    public void Open_两个端点_sessionId各不相同且形如小写hex()
+    {
+        using CourierNode alpha = OpenNode("alpha");
+        using CourierNode beta = OpenNode("beta");
+
+        IReadOnlyList<CourierEndpointInfo> endpoints = alpha.Endpoints();
+
+        Assert.Equal(2, endpoints.Count);
+        Assert.Matches("^[0-9a-f]{8,32}$", endpoints[0].SessionId);
+        Assert.Matches("^[0-9a-f]{8,32}$", endpoints[1].SessionId);
+        Assert.NotEqual(endpoints[0].SessionId, endpoints[1].SessionId);
+    }
+
+    /// <summary>SPEC §5：states 与 actions 一样写进 endpoint.json，并按名字序数升序。</summary>
+    [Fact]
+    public void DeclareState_声明若干状态_endpointJson里按名字升序且带summary()
+    {
+        using CourierNode node = OpenNode("worker");
+        node.DeclareState("zeta", "最后");
+        node.DeclareState("alpha", "最前");
+
+        CourierEndpointInfo endpoint = Assert.Single(node.Endpoints());
+
+        Assert.Equal(2, endpoint.States.Count);
+        Assert.Equal("alpha", endpoint.States[0].Name);
+        Assert.Equal("最前", endpoint.States[0].Summary);
+        Assert.Equal("zeta", endpoint.States[1].Name);
+
+        // SPEC §5：能力表在第一次 Tick 之前冻结，states 与 actions 同命运。
+        node.Tick();
+        Assert.Throws<InvalidOperationException>(() => node.DeclareState("beta", "迟到"));
+    }
+
+    /// <summary>SPEC §14：未声明过的状态名 MUST 拒绝发布，而不是悄悄写一个孤儿文件。</summary>
+    [Fact]
+    public void PublishState_名字未声明_抛出ArgumentException()
+    {
+        using CourierNode node = OpenNode("worker");
+
+        Assert.Throws<ArgumentException>(() => node.PublishState("never-declared", "{}"));
+    }
+
+    /// <summary>SPEC §14：revision 从 1 起单调递增，覆盖写后磁盘上只有最新一份。</summary>
+    [Fact]
+    public void PublishState_连续发布_revision单调递增且只保留最新值()
+    {
+        using CourierNode node = OpenNode("worker");
+        node.DeclareState("document", "当前打开的文档");
+
+        Assert.Equal(1, node.PublishState("document", "{\"path\":\"a.doc\"}"));
+        Assert.Equal(2, node.PublishState("document", "{\"path\":\"b.doc\"}"));
+
+        string statePath = Path.Combine(EndpointDirectory("worker"), "state", "document.json");
+        Assert.True(File.Exists(statePath));
+        Dictionary<string, object?> document = ReadJsonObject(statePath);
+        Assert.Equal("document", CourierJson.GetString(document, "name"));
+        Assert.Equal(2L, CourierJson.GetInteger(document, "revision"));
+        Assert.NotNull(CourierJson.GetString(document, "updatedAtUtc"));
+
+        // payload 是任意 JSON 值：这里恰好是对象，原样保留，不被字符串化。
+        var payload = document["payload"] as Dictionary<string, object?>;
+        Assert.NotNull(payload);
+        Assert.Equal("b.doc", CourierJson.GetString(payload, "path"));
+    }
+
+    /// <summary>SPEC §14：payload 可以是任意 JSON 值，不是合法 JSON 时 MUST 拒绝。</summary>
+    [Fact]
+    public void PublishState_payload不是合法JSON_抛出ArgumentException()
+    {
+        using CourierNode node = OpenNode("worker");
+        node.DeclareState("document", "当前打开的文档");
+
+        Assert.Throws<ArgumentException>(() => node.PublishState("document", "{not json"));
+        Assert.Throws<ArgumentException>(() => node.PublishState("document", ""));
     }
 
     /// <summary>SPEC §6：State 完全由心跳年龄决定，三个阈值互不重叠（直接改文件内容，不 sleep）。</summary>
@@ -147,7 +225,7 @@ public sealed class CourierEndpointsTests : TestRoot
             .AddString("description", "未来版本端点")
             .AddNumber("processId", Environment.ProcessId)
             .AddString("startedAtUtc", CourierProtocol.FormatUtc(DateTime.UtcNow))
-            .AddNumber("protocolVersion", 2)
+            .AddNumber("protocolVersion", CourierProtocol.ProtocolVersion + 1)
             .AddRaw("actions", "[]")
             .Build();
         CourierIO.WriteAtomic(EndpointJsonPath("server"), endpointJson, true);
@@ -161,7 +239,7 @@ public sealed class CourierEndpointsTests : TestRoot
         Assert.Empty(RequestIds(ResultsDirectory("server")));
     }
 
-    /// <summary>SPEC §7：requestId 必须等于文件名，不一致时进 deadletter 而不是执行。</summary>
+    /// <summary>SPEC §9：requestId 必须等于文件名，不一致时进 deadletter 而不是执行。</summary>
     [Fact]
     public void Tick_requestId与文件名不一致_进deadletter()
     {
@@ -193,7 +271,7 @@ public sealed class CourierEndpointsTests : TestRoot
         AssertArchivedCommand("worker", fileName);
     }
 
-    /// <summary>SPEC §7：payload 必须是不透明字符串，写成数字属于解析失败，进 deadletter。</summary>
+    /// <summary>SPEC §9：payload 必须是不透明字符串，写成数字属于解析失败，进 deadletter。</summary>
     [Fact]
     public void Tick_payload不是字符串_进deadletter()
     {
@@ -230,7 +308,7 @@ public sealed class CourierEndpointsTests : TestRoot
     }
 
     /// <summary>
-    /// SPEC §13.1：单轮 Tick 启动的命令数同时受两个上限约束——MAX_INFLIGHT（在途名额）与
+    /// SPEC §16.1：单轮 Tick 启动的命令数同时受两个上限约束——MAX_INFLIGHT（在途名额）与
     /// MAX_TICK_BATCH（单轮启动数）。名额满时 MUST 直接跳过，MUST NOT 阻塞等 handler。
     /// </summary>
     [Fact]
@@ -284,7 +362,7 @@ public sealed class CourierEndpointsTests : TestRoot
         Assert.Empty(RequestIds(ClaimsDirectory("worker")));
     }
 
-    /// <summary>SPEC §12.1：归档路径固定为 archive/&lt;yyyy-MM-dd&gt;/&lt;endpointId&gt;/commands/&lt;requestId&gt;.json，日期取处理时刻。</summary>
+    /// <summary>SPEC §15.1：归档路径固定为 archive/&lt;yyyy-MM-dd&gt;/&lt;endpointId&gt;/commands/&lt;requestId&gt;.json，日期取处理时刻。</summary>
     [Fact]
     public void Tick_命令处理完成_归档到按UTC日期分层的路径()
     {
@@ -361,7 +439,7 @@ public sealed class CourierEndpointsTests : TestRoot
         Assert.Equal(CourierProtocol.StateAlive, CourierEndpointReader.ReadState(EndpointDirectory("worker")));
     }
 
-    /// <summary>SPEC §6 + §18：服务者写出的心跳必须能被自己的读取端读回并判活（读写两侧对同一线格式达成一致）。</summary>
+    /// <summary>SPEC §6 + §21：服务者写出的心跳必须能被自己的读取端读回并判活（读写两侧对同一线格式达成一致）。</summary>
     [Fact]
     public void Tick_写心跳_读取端能读回并判活()
     {

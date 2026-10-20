@@ -6,11 +6,11 @@ using Xunit;
 namespace Courier.Tests;
 
 /// <summary>
-/// 边界与拒绝（SPEC §4.1、§7.1、§7.2、§7.3）。
+/// 边界与拒绝（SPEC §4.1、§9.1、§9.2、§9.3）。
 /// </summary>
 public sealed class CourierBoundaryTests : TestRoot
 {
-    /// <summary>SPEC §7.1：取走时已过 deadline 的命令 MUST NOT 执行，落 rejected/stale 并归档。</summary>
+    /// <summary>SPEC §9.1：取走时已过 deadline 的命令 MUST NOT 执行，落 rejected/stale 并归档。</summary>
     [Fact]
     public void Tick_命令超过deadline_写入rejected_stale()
     {
@@ -41,7 +41,7 @@ public sealed class CourierBoundaryTests : TestRoot
         Assert.Empty(RequestIds(DeadletterDirectory("worker")));
     }
 
-    /// <summary>SPEC §7.2：命令文件超过 MAX_COMMAND_FILE_BYTES 时 MUST 直接 deadletter，不解析、不执行。</summary>
+    /// <summary>SPEC §9.2：命令文件超过 MAX_COMMAND_FILE_BYTES 时 MUST 直接 deadletter，不解析、不执行。</summary>
     [Fact]
     public void Tick_命令文件超过上限_进deadletter()
     {
@@ -109,7 +109,7 @@ public sealed class CourierBoundaryTests : TestRoot
         Assert.True(File.Exists(EndpointJsonPath(endpointId)));
     }
 
-    /// <summary>SPEC §4.1 / §4.3 / §14：非法调用参数属于编程错误，必须在投递前抛异常。</summary>
+    /// <summary>SPEC §4.1 / §4.3 / §17：非法调用参数属于编程错误，必须在投递前抛异常。</summary>
     [Theory]
     [InlineData("App-A", "document", "open")]
     [InlineData("ghost", "doc ument", "open")]
@@ -122,7 +122,7 @@ public sealed class CourierBoundaryTests : TestRoot
         Assert.Empty(RequestIds(CommandsDirectory("caller")));
     }
 
-    /// <summary>SPEC §14：timeout 必须为正数，0 与负数都是编程错误。</summary>
+    /// <summary>SPEC §17：timeout 必须为正数，0 与负数都是编程错误。</summary>
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]
@@ -134,7 +134,7 @@ public sealed class CourierBoundaryTests : TestRoot
         await Assert.ThrowsAsync<ArgumentException>(() => node.CallAsync("ghost", "document", "open", "payload", timeout));
     }
 
-    /// <summary>SPEC §7.3：payload 超上限时由投递方本地合成 rejected/invalid-command，一个命令文件都不写。</summary>
+    /// <summary>SPEC §9.3：payload 超上限时由投递方本地合成 rejected/invalid-command，一个命令文件都不写。</summary>
     [Fact]
     public void Call_payload超过上限_返回rejected_invalid_command且不落盘()
     {
@@ -152,7 +152,7 @@ public sealed class CourierBoundaryTests : TestRoot
         Assert.Empty(RequestIds(ResultsDirectory("server")));
     }
 
-    /// <summary>SPEC §7.3：转义会放大长度，payload 恰好等于上限时序列化后必然超限，仍须本地拒绝。</summary>
+    /// <summary>SPEC §9.3：转义会放大长度，payload 恰好等于上限时序列化后必然超限，仍须本地拒绝。</summary>
     [Fact]
     public void Call_payload接近上限且含转义字符_返回rejected_invalid_command()
     {

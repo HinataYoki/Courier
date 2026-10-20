@@ -20,6 +20,7 @@ namespace Courier.Cli
                 "  courier describe <endpointId> [--json] [--root PATH]\n" +
                 "  courier call <endpointId> <channel>/<action> [--payload TEXT] [--timeout 10s] [--json] [--root PATH]\n" +
                 "  courier ps [--json] [--root PATH]\n" +
+                "  courier state <endpointId> <name> [--json] [--root PATH]\n" +
                 "  courier version [--json]\n" +
                 "  courier --help\n" +
                 "\n" +
@@ -28,6 +29,9 @@ namespace Courier.Cli
                 "  --json           one line of compact JSON on stdout; errors become {\"error\":..,\"detail\":..} on stderr\n" +
                 "  --payload TEXT   opaque string handed to the endpoint handler\n" +
                 "  --timeout DUR    how long to wait for a response, e.g. 500ms, 10s, 1m; default 10s\n" +
+                "\n" +
+                "state reads the latest value an endpoint published under state/<name>.json.\n" +
+                "It has no side effects and never waits: missing means the endpoint has not published yet.\n" +
                 "\n" +
                 "exit codes:\n" +
                 "  0 ok   1 rejected   2 failed   3 unreachable\n");

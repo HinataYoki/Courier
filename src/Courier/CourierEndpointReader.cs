@@ -68,18 +68,19 @@ namespace Courier
                 }
             }
 
-            CourierHotInfo? hot = null;
-            object? rawHot;
-            if (document.TryGetValue("hot", out rawHot) && rawHot is Dictionary<string, object?> hotDocument)
+            // SPEC §14：states 只是"这个端点会发布哪些状态"的声明，值在 state/ 下按需读取。
+            // 名字非法的条目直接跳过——一条坏声明不该让整个端点的能力目录变得不可读。
+            var states = new List<CourierStateInfo>();
+            List<object?>? rawStates = CourierJson.GetArray(document, "states");
+            if (rawStates != null)
             {
-                string? kind = CourierJson.GetString(hotDocument, "kind");
-                if (kind != null)
+                for (int index = 0; index < rawStates.Count; index++)
                 {
-                    hot = new CourierHotInfo(
-                        kind,
-                        CourierJson.GetString(hotDocument, "address") ?? string.Empty,
-                        CourierJson.GetString(hotDocument, "protocol") ?? string.Empty,
-                        CourierJson.GetString(hotDocument, "fallback") ?? "file");
+                    Dictionary<string, object?>? stateDocument = rawStates[index] as Dictionary<string, object?>;
+                    if (stateDocument == null) continue;
+                    string? name = CourierJson.GetString(stateDocument, "name");
+                    if (name == null || !CourierProtocol.IsValidName(name)) continue;
+                    states.Add(new CourierStateInfo(name, CourierJson.GetString(stateDocument, "summary") ?? string.Empty));
                 }
             }
 
@@ -89,11 +90,12 @@ namespace Courier
             return new CourierEndpointInfo(
                 endpointId,
                 CourierJson.GetString(document, "description") ?? string.Empty,
+                CourierJson.GetString(document, "sessionId") ?? string.Empty,
                 Clamp(CourierJson.GetInteger(document, "processId")),
                 startedAtUtc,
                 Clamp(CourierJson.GetInteger(document, "protocolVersion")),
                 actions,
-                hot,
+                states,
                 ReadHeartbeatAgeMs(directory));
         }
 

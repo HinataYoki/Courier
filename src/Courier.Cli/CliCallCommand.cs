@@ -5,11 +5,11 @@ using System.Threading;
 namespace Courier.Cli
 {
     /// <summary>
-    /// `courier call &lt;endpointId&gt; &lt;channel&gt;/&lt;action&gt;`：投递一条命令并等待终态（SPEC §7.3、§14）。
+    /// `courier call &lt;endpointId&gt; &lt;channel&gt;/&lt;action&gt;`：投递一条命令并等待终态（SPEC §9.3、§17）。
     /// <para>
     /// 投递复用产品库的 <see cref="CourierDispatcher.Deliver"/>，前置检查（版本、背压、体积）与库内
     /// <c>CallAsync</c> 完全同源；CLI 只补两件它必须自己做的事：读环境变量决定 issuedBy，以及同步轮询结果文件。
-    /// 短命进程用同步等待是安全的（SPEC §14.3 明确允许），因为它没有 Tick 循环，不会和另一端互等。
+    /// 短命进程用同步等待是安全的（SPEC §17.3 明确允许），因为它没有 Tick 循环，不会和另一端互等。
     /// </para>
     /// </summary>
     internal static class CliCallCommand
@@ -57,7 +57,7 @@ namespace Courier.Cli
 
             string issuedBy = IssuedBy();
             string requestId;
-            // SPEC §7.1：timeout 同时是"调用方等多久"和"服务者最晚什么时候还允许开始执行"，
+            // SPEC §9.1：timeout 同时是"调用方等多久"和"服务者最晚什么时候还允许开始执行"，
             // 两者必须是同一个数，否则调用方已经放弃、命令却还能被执行。
             CourierResponse? early = CourierDispatcher.Deliver(root, issuedBy, endpointId, channel, action, arguments.Payload, timeout, out requestId);
             CourierResponse response = early ?? Wait(root, endpointId, requestId, timeout);
@@ -77,7 +77,7 @@ namespace Courier.Cli
         }
 
         /// <summary>
-        /// 轮询 results/ 等待终态（SPEC §14.2）：10 ms 起指数退避到 200 ms 上限，到点合成 unreachable。
+        /// 轮询 results/ 等待终态（SPEC §17.2）：10 ms 起指数退避到 200 ms 上限，到点合成 unreachable。
         /// unreachable 不落盘，它是调用方的判断而不是对端的答复。
         /// </summary>
         /// <param name="root">协议根目录。</param>
