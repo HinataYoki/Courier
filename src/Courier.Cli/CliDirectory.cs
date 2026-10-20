@@ -53,6 +53,15 @@ namespace Courier.Cli
             return (long)milliseconds;
         }
 
+        /// <summary>租约还剩多少毫秒（SPEC §8.1）；已过期返回 0。</summary>
+        /// <param name="expiresAtUtc">claim 里记录的租约到期时刻。</param>
+        /// <param name="nowUtc">当前 UTC 时刻。</param>
+        /// <returns>非负毫秒数，过期即 0。</returns>
+        internal static long LeaseRemainingMs(DateTime expiresAtUtc, DateTime nowUtc)
+        {
+            return AgeMs(nowUtc, expiresAtUtc);
+        }
+
         /// <summary>
         /// 扫描全部端点 claims/ 下正在处理的请求（SPEC §8）。
         /// 先按 endpointId、再按认领时刻排序，让 `courier ps` 的两次输出可以直接 diff。

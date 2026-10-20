@@ -39,7 +39,8 @@ public sealed class CourierSemanticsTests : TestRoot
 
         string requestId = DeliverCommand("worker", "document", "close", "main.doc");
 
-        node.Tick();
+        // SPEC §13.1：Tick 只启动，不等 handler；断言终态前必须把泵跑空。
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         CourierResponse? response = ReadResponse("worker", requestId);
         Assert.NotNull(response);
@@ -60,8 +61,8 @@ public sealed class CourierSemanticsTests : TestRoot
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
 
-        // Tick 不得把异常抛给宿主（SPEC §3.1）。
-        node.Tick();
+        // Tick 不得把异常抛给宿主（SPEC §3.1）：handler 在线程池上跑，异常变成 failed/handler-error。
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         CourierResponse? response = ReadResponse("worker", requestId);
         Assert.NotNull(response);
@@ -83,7 +84,7 @@ public sealed class CourierSemanticsTests : TestRoot
         string rejectedId = DeliverCommand("worker", "document", "missing", "x");
         string failedId = DeliverCommand("worker", "document", "boom", "x");
 
-        node.Tick();
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         CourierResponse? rejected = ReadResponse("worker", rejectedId);
         Assert.NotNull(rejected);
@@ -107,7 +108,7 @@ public sealed class CourierSemanticsTests : TestRoot
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
 
-        node.Tick();
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         CourierResponse? response = ReadResponse("worker", requestId);
         Assert.NotNull(response);
@@ -153,7 +154,7 @@ public sealed class CourierSemanticsTests : TestRoot
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
         WriteCancelFile("worker", requestId);
 
-        node.Tick();
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         Assert.Equal(0, calls);
 
@@ -166,30 +167,39 @@ public sealed class CourierSemanticsTests : TestRoot
         AssertArchivedCommand("worker", requestId);
     }
 
-    /// <summary>SPEC §11.1：handler 收到取消但不采纳时，响应仍是 ok，并带 cancelRequested=true。</summary>
+    /// <summary>
+    /// SPEC §11.1：取消 MUST 能到达正在执行的 handler，而 handler 可以忽略它——
+    /// 此时响应仍是 ok，并带 cancelRequested=true（不是第四种终态）。
+    /// </summary>
     [Fact]
     public void Tick_处理器忽略取消_仍返回ok且带cancelRequested()
     {
         using CourierNode node = OpenNode("worker");
 
         string? requestId = null;
-        bool cancelSeenByHandler = false;
-        node.Handle("document", "open", "打开文档", handlerPayload =>
+        var cancelObserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // handler 自己制造"执行期间收到取消"：写一个 cancels/ 文件，然后等 Tick 把取消送到 token 上。
+        // 这正是 SPEC §13.1 要求的能力——handler 与 Tick 并发推进，所以 Tick 还能跑，
+        // ProcessCancels 还能碰到这条在途命令。旧设计里 Tick 被 handler 占着，这一段结构上不可能发生。
+        node.HandleAsync("document", "open", "打开文档", async (handlerPayload, token) =>
         {
-            // "执行期间收到取消"只能由 handler 自己制造：写入 cancels/ 后重入一次 Tick。
-            // 此时 mActiveCancels 已登记本 requestId（CourierNode.cs:511-516），
-            // ProcessCancels 走 source.Cancel() 分支，不会写 cancelled-before-start；
-            // 内层命令循环又因 claim 存在且未过期而直接返回，不会递归执行本命令。
             WriteCancelFile("worker", requestId!);
-            node.Tick();
-            cancelSeenByHandler = true;
+            DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (!token.IsCancellationRequested && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(5).ConfigureAwait(false);
+            }
+
+            if (token.IsCancellationRequested) cancelObserved.TrySetResult(true);
+            // 故意无视取消，照常返回。
             return "ignored-cancel";
         });
 
         requestId = DeliverCommand("worker", "document", "open", "main.doc");
-        node.Tick();
+        node.WaitForIdle(TimeSpan.FromSeconds(15));
 
-        Assert.True(cancelSeenByHandler);
+        Assert.True(cancelObserved.Task.IsCompleted, "取消没有送到正在执行的 handler 上");
 
         // 取消文件已被 ProcessCancels 消费掉。
         Assert.Empty(RequestIds(CancelsDirectory("worker")));

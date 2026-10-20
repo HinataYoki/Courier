@@ -14,7 +14,7 @@ namespace Courier.Tests;
 /// </summary>
 public abstract class TestRoot : IDisposable
 {
-    /// <summary>SPEC §15 原因码总表。handler-timeout 尚无 CourierProtocol 常量，用字面量补齐。</summary>
+    /// <summary>SPEC §15 原因码总表。服务者侧的每一个原因码都必须在这里，多一个就说明实现私自加了码。</summary>
     private static readonly string[] SpecReasonTable =
     {
         CourierProtocol.ReasonStale,
@@ -23,8 +23,8 @@ public abstract class TestRoot : IDisposable
         CourierProtocol.ReasonCancelledBeforeStart,
         CourierProtocol.ReasonBackpressure,
         CourierProtocol.ReasonHandlerError,
-        CourierProtocol.ReasonCancelled,
-        "handler-timeout"
+        CourierProtocol.ReasonHandlerTimeout,
+        CourierProtocol.ReasonCancelled
     };
 
     protected TestRoot()
@@ -143,11 +143,34 @@ public abstract class TestRoot : IDisposable
         CourierIO.WriteAtomic(CommandsPath(endpointId, fileName), json, true);
     }
 
-    protected void WriteClaimFile(string endpointId, string requestId, DateTime claimedAtUtc, int attempts)
+    /// <summary>按 SPEC §8.1 写一个租约：expiresAtUtc 是到期时刻，不是认领时刻。</summary>
+    /// <param name="endpointId">目标端点。</param>
+    /// <param name="requestId">命令标识。</param>
+    /// <param name="expiresAtUtc">租约到期时刻。</param>
+    /// <param name="attempts">这是第几次认领。</param>
+    protected void WriteClaimFile(string endpointId, string requestId, DateTime expiresAtUtc, int attempts)
     {
         Directory.CreateDirectory(ClaimsDirectory(endpointId));
-        CourierClaim claim = CourierClaim.Create(endpointId, claimedAtUtc, attempts);
+        CourierClaim claim = CourierClaim.Create(endpointId, expiresAtUtc, attempts);
         CourierIO.WriteAtomic(ClaimsPath(endpointId, requestId), claim.ToJson(), true);
+    }
+
+    /// <summary>写一个"刚认领、租约还新鲜"的 claim：到期时刻为 now + window。</summary>
+    /// <param name="endpointId">目标端点。</param>
+    /// <param name="requestId">命令标识。</param>
+    /// <param name="attempts">这是第几次认领。</param>
+    protected void WriteFreshClaimFile(string endpointId, string requestId, int attempts)
+    {
+        WriteClaimFile(endpointId, requestId, DateTime.UtcNow + CourierProtocol.ClaimWindow, attempts);
+    }
+
+    /// <summary>写一个"持有者已失联"的 claim：到期时刻早于 now，可被下一个 Tick 接管。</summary>
+    /// <param name="endpointId">目标端点。</param>
+    /// <param name="requestId">命令标识。</param>
+    /// <param name="attempts">这是第几次认领。</param>
+    protected void WriteExpiredClaimFile(string endpointId, string requestId, int attempts)
+    {
+        WriteClaimFile(endpointId, requestId, DateTime.UtcNow - TimeSpan.FromSeconds(1), attempts);
     }
 
     protected void WriteResultFile(string endpointId, string requestId, string status, string payload, string? reason)

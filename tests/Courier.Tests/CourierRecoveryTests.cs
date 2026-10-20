@@ -23,7 +23,7 @@ public sealed class CourierRecoveryTests : TestRoot
         });
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
-        WriteClaimFile("worker", requestId, DateTime.UtcNow, 1);
+        WriteFreshClaimFile("worker", requestId, 1);
 
         node.Tick();
 
@@ -52,9 +52,10 @@ public sealed class CourierRecoveryTests : TestRoot
             return "opened";
         });
 
-        WriteClaimFile("worker", requestId, DateTime.UtcNow - TimeSpan.FromSeconds(60), 1);
+        WriteExpiredClaimFile("worker", requestId, 1);
 
-        node.Tick();
+        // SPEC §13.1：Tick 只负责启动，handler 在线程池上跑，所以必须等到空闲才看得到终态。
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         Assert.Equal(1, calls);
         Assert.Equal(2, observedAttempts);
@@ -78,7 +79,7 @@ public sealed class CourierRecoveryTests : TestRoot
         });
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
-        WriteClaimFile("worker", requestId, DateTime.UtcNow - TimeSpan.FromSeconds(60), CourierProtocol.MaxAttempts);
+        WriteExpiredClaimFile("worker", requestId, CourierProtocol.MaxAttempts);
 
         node.Tick();
 
@@ -109,7 +110,7 @@ public sealed class CourierRecoveryTests : TestRoot
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
         WriteResultFile("worker", requestId, CourierProtocol.StatusOk, "cached", null);
-        WriteClaimFile("worker", requestId, DateTime.UtcNow, 1);
+        WriteFreshClaimFile("worker", requestId, 1);
 
         node.Tick();
 

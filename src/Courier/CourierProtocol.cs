@@ -21,8 +21,11 @@ namespace Courier
         /// <summary>SPEC §16：投递方判定背压的 commands/ 文件数阈值。</summary>
         internal const int MaxCommandsBackpressure = 4096;
 
-        /// <summary>SPEC §16：单次 Tick 最多处理多少条命令，防止积压拖死宿主。</summary>
+        /// <summary>SPEC §16：单次 Tick 最多**启动**多少条命令，防止积压拖死宿主。</summary>
         internal const int MaxTickBatch = 16;
+
+        /// <summary>SPEC §13.1：单个端点同时在跑的 handler 上限，防止积压时把线程池占满。</summary>
+        internal const int MaxInflight = 4;
 
         /// <summary>SPEC §16：同一条命令最多尝试几次。</summary>
         internal const int MaxAttempts = 3;
@@ -52,11 +55,21 @@ namespace Courier
             "yyyy-MM-dd'T'HH:mm:ss'Z'"
         };
 
-        /// <summary>SPEC §8.1：claim 窗口，MUST 大于最长 handler 执行时间、小于剩余 deadline。</summary>
-        internal static readonly TimeSpan ClaimWindow = TimeSpan.FromSeconds(30);
+        /// <summary>
+        /// SPEC §8.1：claim 的租约长度。认领时写 expiresAtUtc = now + ClaimWindow，
+        /// 执行期间由 Tick 按 <see cref="ClaimRenewInterval"/> 续约。慢 handler 靠续约维持租约，
+        /// 不靠把窗口调大——窗口只需要大于一个续约周期，不需要大于最长执行时间。
+        /// </summary>
+        internal static readonly TimeSpan ClaimWindow = TimeSpan.FromSeconds(10);
 
-        /// <summary>SPEC §16：投递时默认的 deadline 长度。</summary>
+        /// <summary>SPEC §16：续约间隔，MUST 小于 <see cref="ClaimWindow"/>。</summary>
+        internal static readonly TimeSpan ClaimRenewInterval = TimeSpan.FromSeconds(2);
+
+        /// <summary>SPEC §16：投递时默认的 deadline 长度，可由调用方按次覆盖。</summary>
         internal static readonly TimeSpan DefaultDeadline = TimeSpan.FromSeconds(10);
+
+        /// <summary>SPEC §16：调用方给的 deadline 上限，超过即截断，防止命令在盘上躺太久。</summary>
+        internal static readonly TimeSpan MaxDeadline = TimeSpan.FromSeconds(300);
 
         /// <summary>SPEC §6：age 小于等于该值即 alive。</summary>
         internal static readonly TimeSpan HeartbeatAlive = TimeSpan.FromSeconds(5);
@@ -82,6 +95,7 @@ namespace Courier
         internal const string ReasonCancelledBeforeStart = "cancelled-before-start";
         internal const string ReasonBackpressure = "backpressure";
         internal const string ReasonHandlerError = "handler-error";
+        internal const string ReasonHandlerTimeout = "handler-timeout";
         internal const string ReasonCancelled = "cancelled";
 
         /// <summary>SPEC §6：心跳年龄在阈值内。</summary>

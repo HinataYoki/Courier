@@ -12,7 +12,7 @@ CourierNode  ──command.json──▶  commands/  ──▶  CourierNode
 
 > 名字取自"信使"。与商业通知服务 Courier.com 无关。
 
-**当前状态：M0 已完成（协议规范定稿），M1 已完成（C# 实现 + `courier` CLI 双进程互调跑通）。** 本仓库交付 `SPEC.md` 协议规范、`src/Courier/` 的协议实现、`src/Courier.Cli/` 的 `courier` CLI、`tests/Courier.Tests/` 的测试套件、`tools/bench/` 的载体基准、`tools/e2e/` 的双进程端到端工具和 `tools/compat/` 的宿主兼容性验证工程。产品源码可在 `net10.0` 与 `netstandard2.1` 两个目标下编译，可整份拖进 Unity 等宿主工程。
+**当前状态：M0 已完成（协议规范定稿），M1 已完成（C# 实现 + `courier` CLI 双进程互调跑通）。** 服务循环是**非阻塞泵**：`Tick` 只负责启动与收割，不等任何 handler 跑完，所以慢任务不会把端点自己拖成 `dead`，取消能真正送到在途 handler，租约也会在长任务里持续续约（[SPEC.md §13.1](SPEC.md)）。本仓库交付 `SPEC.md` 协议规范、`src/Courier/` 的协议实现、`src/Courier.Cli/` 的 `courier` CLI、`tests/Courier.Tests/` 的测试套件、`tools/bench/` 的载体基准、`tools/e2e/` 的双进程端到端工具和 `tools/compat/` 的宿主兼容性验证工程。产品源码可在 `net10.0` 与 `netstandard2.1` 两个目标下编译，可整份拖进 Unity 等宿主工程。
 
 ---
 
@@ -69,7 +69,7 @@ $ courier call app-a document/open --payload '{"path":"Main.doc"}'
 {"status":"ok","payload":{"path":"Main.doc","openedAtUtc":"..."}}
 
 $ courier ps
-app-a  20261020T031500Z-1a2b3c4d  owner=app-a  claimed 0.4s ago  attempt 1
+app-a  20261020T031500Z-1a2b3c4d  owner=app-a  lease 0.4s left  attempt 1
 ```
 
 | | 内嵌 MCP server | Courier + CLI |
@@ -101,7 +101,7 @@ app-a  20261020T031500Z-1a2b3c4d  owner=app-a  claimed 0.4s ago  attempt 1
 
 | 档 | 形态 | 谁用 | 代码量 | 需要嵌进宿主 |
 |---|---|---|---|---|
-| **C** | 源码移植 | 被调用方（Host） | 300–600 行 | 是（源码须能在宿主的 API 兼容级别下编译，见 [tools/compat](tools/compat)） |
+| **C** | 源码移植 | 被调用方（Host） | 7 个文件、约 1700 有效行（整份 `src/Courier/`） | 是（源码须能在宿主的 API 兼容级别下编译，见 [tools/compat](tools/compat)） |
 | **B** | stdio 助手子进程 | 被调用方（Host） | 约 50–150 行 | 否 |
 | **A** | CLI 子进程 | 调用方、观察方 | 0 行 | 否 |
 
@@ -140,21 +140,21 @@ app-a  20261020T031500Z-1a2b3c4d  owner=app-a  claimed 0.4s ago  attempt 1
 |---|---|
 | M0 | SPEC.md 定稿（本文档已完成） |
 | M1 | C# `CourierNode` 最小可用：两个进程互相调用成功（**已完成**） |
-| M2 | 崩溃恢复：claim 过期、deadletter、过期命令拒绝 |
+| M2 | 崩溃恢复：租约过期接管、deadletter、过期命令拒绝（**已完成**，见 `CourierRecoveryTests`） |
 | M2.5 | stdio 助手：非 C# 宿主完成一次往返 |
 | M3 | `courier` CLI（已随 M1 交付 `endpoints`/`describe`/`call`/`ps`/`version`） |
-| M4 | 归档与 GC |
+| M4 | 归档已随 M1 落地；`results/` 的 GC 墓碑（`gc.json`）未做 |
 | M5 | 两个 C# 软件互调完整示例 |
 | M6 | 任意语言 Host 演示（Python） |
 | M7 | Python C 档实现，与 C# 双向对拍 |
-| M8 | 体积预算守卫 |
+| M8 | 体积预算守卫（**待定**：SPEC 目前没有体积条款，`src/Courier/` 实测 1714 有效行 / 5 个 public 类型，是否设限需先定预算再谈守卫） |
 | M9 | 三方（含环）互调压测 |
 | M10 | 发现语义验证 |
 | M11 | 缺口定稿 |
-| M12 | 慢 handler 压测 |
+| M12 | 慢 handler 压测（泵模型已就位，见 `CourierPumpTests`） |
 | M13 | 快通道声明与回落 |
 
-**现在处于 M1 之后。** 下一步是 M2（真进程崩溃恢复验证）与 M4（归档与 GC）。
+**现在处于 M2 之后。** 下一步是 M4 的 `results/` GC 与 M12 的慢 handler 压测。
 
 ---
 

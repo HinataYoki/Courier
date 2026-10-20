@@ -57,7 +57,9 @@ namespace Courier.Cli
 
             string issuedBy = IssuedBy();
             string requestId;
-            CourierResponse? early = CourierDispatcher.Deliver(root, issuedBy, endpointId, channel, action, arguments.Payload, out requestId);
+            // SPEC §7.1：timeout 同时是"调用方等多久"和"服务者最晚什么时候还允许开始执行"，
+            // 两者必须是同一个数，否则调用方已经放弃、命令却还能被执行。
+            CourierResponse? early = CourierDispatcher.Deliver(root, issuedBy, endpointId, channel, action, arguments.Payload, timeout, out requestId);
             CourierResponse response = early ?? Wait(root, endpointId, requestId, timeout);
 
             WriteResponse(arguments, endpointId, channel, action, timeout, response);

@@ -201,7 +201,8 @@ public sealed class CourierAtomicityTests : TestRoot
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
 
-        node.Tick();
+        // 反复驱动泵：无论 Tick 多少轮，同一条命令只被启动一次、只产生一个终态（SPEC §13.1）。
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
         node.Tick();
         node.Tick();
 

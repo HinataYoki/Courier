@@ -25,6 +25,8 @@
 3. **落盘即承诺**：出现在 `commands/` 的每条命令 MUST 最终产出一个终态证据（`results/` 中的响应，或 `deadletter/` 中的记录）。MUST NOT 静默丢弃。
 4. **原子写只有一种**：同目录临时文件 → flush/close → rename。MUST NOT 直接写目标文件。
 
+**投递语义是 at-least-once，不是 exactly-once。** 服务者崩溃、租约过期后被接管（§8.1），都可能让同一条命令被执行两次。需要恰好一次副作用的 handler 必须自己按 `requestId` 去重。协议不提供、也不假装提供 exactly-once。
+
 ---
 
 ## 2. 信道布局
@@ -33,7 +35,7 @@
 <root>/
 ├── endpoints/
 │   └── <endpointId>/
-│       ├── endpoint.json          # 能力目录，写一次，退出不删
+│       ├── endpoint.json          # 能力目录，首次 Tick 前写完即冻结，退出不删
 │       ├── heartbeat              # 单个 UTC 时间戳，每 tick 覆盖写
 │       ├── commands/              # 投递方写
 │       │   └── <requestId>.json
@@ -59,7 +61,7 @@
 
 | 目录 / 文件 | 唯一写入者 | 允许读者 |
 |---|---|---|
-| `endpoints/<id>/endpoint.json` | 该端点服务者（启动时一次） | 所有人 |
+| `endpoints/<id>/endpoint.json` | 该端点服务者（首次 Tick 前，之后冻结） | 所有人 |
 | `endpoints/<id>/heartbeat` | 该端点服务者 | 所有人 |
 | `endpoints/<id>/commands/` | **投递方**（任意多个） | 该端点服务者 |
 | `endpoints/<id>/claims/` | 该端点服务者 | 该端点服务者、观察工具（只读） |
@@ -155,7 +157,7 @@
 
 ## 5. `endpoint.json`
 
-启动时写一次，端点退出时**不删**。
+启动阶段写完即**冻结**，端点退出时**不删**。
 
 ```json
 {"endpointId":"app-a","description":"桌面排版工具","processId":41232,"startedAtUtc":"2026-10-19T13:50:00.0000000Z","protocolVersion":1,"actions":[{"channel":"document","action":"open","summary":"打开文档"}]}
@@ -171,7 +173,11 @@
 | `actions` | array | MUST | 可为空数组 |
 | `hot` | object | MAY | 快通道声明，见 §5.2 |
 
-**MUST 整体原子替换，MUST NOT 增量追加。** 启动时先构造本次运行的**完整** actions 列表再覆盖整个文件。增量追加会让上一版注册过、这一版已删除的能力永远留在文件里，形成一个永远返回 `rejected/unknown-action` 的幽灵能力。
+**MUST 整体原子替换，MUST NOT 增量追加。** 先构造本次运行的**完整** actions 列表再覆盖整个文件。增量追加会让上一版注册过、这一版已删除的能力永远留在文件里，形成一个永远返回 `rejected/unknown-action` 的幽灵能力。
+
+**能力表在第一次 `Tick` 之前写完，此后冻结。** 逐条注册的实现每注册一条就整体重写一次文件，这没问题——只要全部发生在第一次 `Tick` 之前。第一次 `Tick` 之后 MUST NOT 再改 `endpoint.json`：实现 MUST 在此时拒绝新的能力注册并抛错，MUST NOT 静默改写。
+
+理由：`endpoint.json` 是投递方与观察方唯一的能力来源。运行期改它，等于让"这个端点能做什么"变成一个随时间变化的目标——投递方刚读到的能力，可能在下一次读时就不存在了。冻结把能力表变回一个可缓存的常量。
 
 ### 5.1 actions 条目
 
@@ -198,7 +204,7 @@
 ## 6. `heartbeat`
 
 - 内容是**单个 UTC 时间戳字符串**，无 JSON、无换行亦可。
-- 每个 `Tick` MUST 覆盖写一次（原子写，§3.3）。
+- 每次 `Tick` MUST 覆盖写一次（原子写，§3.3）。
 - 判活阈值（可配置，默认值）：
 
 | 状态 | 条件 |
@@ -209,6 +215,10 @@
 
 - 心跳 MUST NOT 塞进 `endpoint.json`：那会让每次心跳重写能力目录，既浪费又破坏"写一次"的语义。
 - 心跳 MUST 用覆盖写，MUST NOT 追加，避免无限增长。
+
+**心跳的含义是"服务循环还活着"，不是"某个 handler 正在跑"。** handler 在服务者内部执行（§13.1），执行期间服务循环 MUST 继续按宿主节奏 `Tick`，心跳照常更新。一个跑了 20 秒的 handler MUST NOT 让端点显示成 `dead`——观察方看到 `dead` 就应当认为这个端点再也处理不了任何命令，而不是"它很忙"。
+
+换句话说：**心跳不能由 handler 的进度决定。** 如果心跳只在"一轮 Tick 从头跑到尾"之后才更新，那么任何慢 handler 都会把端点自己判死，而杀死它的正是它自己。
 
 ---
 
@@ -234,7 +244,8 @@
 
 - 服务者取走命令时若 `now > deadlineUtc`，MUST NOT 执行，直接写 `rejected/stale` 并归档。
 - 目的：防止"软件关了两小时后开机，执行一堆陈旧命令"。
-- 默认 `now + 10 s`（§16）。
+- 投递方 MUST 用 `issuedAtUtc + deadline` 生成该字段，其中 `deadline` 默认 `DEFAULT_DEADLINE`（10 s，§16），可由调用方按次覆盖（§14.2），但 MUST NOT 超过 `MAX_DEADLINE`（默认 300 s）。超过时按 `MAX_DEADLINE` 截断，MUST NOT 报错。
+- 为什么要有上限：`deadlineUtc` 是"这条命令最晚可以开始执行"的时刻，不是"最晚必须完成"。一个 300 s 的 deadline 意味着命令可以在队列里躺五分钟才被处理。没有上限时，一次误传的极大值就能让一条命令在磁盘上存活到下一次重启。
 
 ### 7.2 大小上限
 
@@ -259,22 +270,27 @@
 路径：`endpoints/<id>/claims/<requestId>.json`。
 
 ```json
-{"owner":"app-a","claimedAtUtc":"2026-10-19T13:52:43.9000000Z","attempts":1}
+{"owner":"app-a","expiresAtUtc":"2026-10-19T13:52:53.9000000Z","attempts":1}
 ```
 
-- MUST 以**不覆盖**语义创建（`FileMode.CreateNew`）。创建失败（已存在）说明别的 tick 已在处理，本次跳过。
+- MUST 以**不覆盖**语义创建（`FileMode.CreateNew`）。创建失败（已存在）说明别的服务循环已在处理，本次跳过。
 - `attempts` 从 1 开始，每次重新认领 +1。
 - **重试计数 MUST 写在这里，MUST NOT 写进命令文件。** 命令是投递方的产物，服务者改它等于篡改来信。
 - 处理结束后 MUST 删除 claim。
 
-### 8.1 claim 窗口（MUST）
+### 8.1 claim 是一个租约
 
-- 定义：claim 的 `claimedAtUtc` 距今超过 `CLAIM_WINDOW` 且没有对应 result，视为过期。
-- 默认 `CLAIM_WINDOW = 30 s`。
-- **MUST 满足**：`CLAIM_WINDOW > 该端点所有 handler 的最长执行时间`。
-- **MUST 满足**：`CLAIM_WINDOW < 命令剩余 deadline`。
+claim 不是"我领了这条命令"的记号，而是一个**有到期时刻的租约**：`expiresAtUtc` 之前，别的服务循环看到它就必须退让；`expiresAtUtc` 之后，它自动失效。
 
-违反第一条的后果：handler 跑 60 s 而窗口是 10 s 时，第二个 tick 会认为认领失效、重新认领、**同一条命令并行执行两次**。这是文件式队列最隐蔽的正确性缺陷——只在 handler 慢的时候出现，快机器上跑测试永远复现不了。
+- 认领时 MUST 写 `expiresAtUtc = now + CLAIM_WINDOW`（默认 `CLAIM_WINDOW = 10 s`，§16）。
+- 认领方 MUST 在 handler 执行期间**续约**：每 `CLAIM_RENEW_INTERVAL`（默认 2 s）把 `expiresAtUtc` 推到 `now + CLAIM_WINDOW`，原子覆盖。
+- 续约 MUST 只在租约仍然属于自己时进行：重读 claim，若 `owner` 不是自己或文件已消失，说明租约已被别人接管，MUST **立即放弃执行**，MUST NOT 写 `results/`。
+- 租约过期且没有对应 result，视为持有者已死，别的服务循环可以接管并 `attempts + 1`。
+- 若 `attempts` 超过 `MAX_ATTEMPTS`（默认 3），接管方 MUST 转 `deadletter/`，MUST NOT 再执行。
+
+这样定义之后，`CLAIM_WINDOW` 就不再需要"大于最长 handler 执行时间"——慢 handler 靠续约维持租约，不靠一个拍脑袋的大窗口。原先那种写法在数学上无法与 `DEFAULT_DEADLINE` 同时成立（窗口要大于 handler、又要小于 10 s 的 deadline），是自相矛盾的。
+
+**租约过期被接管，同一条命令就可能被执行两次。** 这是 at-least-once 的代价（§1），不是可以靠调参数消除的缺陷：持有者可能只是在续约前恰好被操作系统挂起了。协议选择把这条窗口写明白，而不是假装它不存在。需要恰好一次的 handler MUST 自己按 `requestId` 去重。
 
 ---
 
@@ -343,11 +359,15 @@
 {"requestId":"20261019T135243Z-7f3a2b1c","requestedAtUtc":"2026-10-19T13:52:45.0000000Z","reason":"user-aborted"}
 ```
 
-- 服务者 MUST 在每个 `Tick` 检查 `cancels/`，对**正在执行**的 requestId 触发 `CancellationToken`。
+- 服务者 MUST 在**每次** `Tick` 检查 `cancels/`，对**正在执行**的 requestId 触发 `CancellationToken`。
 - 命令尚未开始执行时收到 cancel：MUST 直接写 `rejected/cancelled-before-start` 并归档，不执行。
 - handler **MAY 忽略取消**。此时仍按原逻辑执行完，响应 MUST 携带 `"cancelRequested":true`，让调用方知道取消来得太晚。
 - 响应仍只有 `ok`/`rejected`/`failed` 三种，MUST NOT 引入第四种终态。
 - 取消是**尽力而为**，不是保证。协议不承诺"发出 cancel 后 handler 一定停止"。
+
+**这条能力成立的前提是 §13.1：`Tick` 不被 handler 阻塞。** 如果 `Tick` 在 handler 返回之前不返回，那么"每个 Tick 检查 cancels/"就退化成"handler 跑完之前永远不检查"——取消文件只能等 handler 自己结束才被发现，等于没有取消。实现 MUST 让 handler 与 `Tick` 并发推进，并且 MUST 把 `CancellationToken` 传进 handler。
+
+handler 收到取消后有两种合规做法：抛 `OperationCanceledException`（→ `failed/cancelled`），或者自行收尾返回 `ok`（→ `ok` + `cancelRequested:true`）。两种都合法，区别只是"取消来得及"还是"来不及"。
 
 ### 11.2 progress
 
@@ -400,19 +420,38 @@ deadletter 同理移动到 `archive/<yyyy-MM-dd>/<endpointId>/deadletter/`（可
 
 ## 13. 服务者处理循环（`Tick`）
 
-`Tick` MUST 是可重入的安全点：**每次调用要么完整处理一条命令，要么什么都不做**。
+`Tick` 是一个**非阻塞的泵**：它把命令从队列里推进到"执行中"，把执行完的收回来写成终态，然后立刻返回。它 MUST NOT 等任何 handler 跑完。
 
 ```
 Tick():
   1. 确保自身目录存在
   2. 原子覆盖写 heartbeat
   3. 处理 cancels/：对 in-flight 的 requestId 触发取消
-  4. 枚举 commands/*.json，按文件名升序，最多处理 MAX_TICK_BATCH 条
-     对每一条执行 Process(requestId)
-  5. 清理终态已完成的 progress/ 文件
+  4. 收割：把已完成的 in-flight 结果写成终态（results/ 或 deadletter/），
+     归档命令、删除 claim、删除 progress、释放 in-flight 名额
+  5. 续约：对仍在执行的 in-flight，把 claim 的 expiresAtUtc 推到 now + CLAIM_WINDOW
+  6. 启动：枚举 commands/*.json，按文件名升序，在名额内最多启动 MAX_TICK_BATCH 条
+     —— 启动即返回，不等 handler 结束
+  7. 清理终态已完成的 progress/ 文件
 ```
 
-`Process(requestId)`：
+`Tick` MUST 是可重入的安全点：每次调用要么把某条命令推进到"执行中"，要么写出一条终态，要么什么都不做。**它 MUST NOT 因为某条命令执行得久而阻塞。**
+
+### 13.1 handler 与 Tick 并发推进
+
+handler 在 `Tick` 之外执行（线程池、异步任务，或宿主自己的执行器），`Tick` 只负责启动与收割。
+
+- in-flight 数量 MUST ≤ `MAX_INFLIGHT`（默认 4）。名额满时第 6 步直接跳过，不阻塞。
+- `MAX_TICK_BATCH`（默认 16）限制的是**单轮启动多少条**，不是单轮跑完多少条。
+- `Tick` 与 handler MUST 能并发推进；实现 MUST 用锁或不可变快照保护 in-flight 表，MUST NOT 让 handler 直接改 `Tick` 正在遍历的集合。
+- **MUST NOT 并发调用 `Tick`。** 两个线程同时 Tick 会同时看到"无 result、无 claim"，然后各写一次，破坏 claim 的独占语义。这条约束无法在运行时便宜地检测，只能写成规则并由实现声明。
+- `Tick` 的单次工作量 MUST 有界：至多启动 `MAX_TICK_BATCH` 条、至多收割当前 in-flight 数。
+
+**为什么必须这样设计。** 如果 `Tick` 同步跑完 handler 再返回，会同时坏掉三件事：心跳（§6）在 handler 执行期间不更新，慢 handler 把端点自己判死；取消（§11.1）只在 Tick 开头检查，而 handler 运行期间根本进不了 Tick，取消永远送不到；claim 租约（§8.1）无法续约，任何超过 `CLAIM_WINDOW` 的 handler 都会被别的循环接管、并行执行两次。这三件事不是三个独立的 bug，是同一个设计错误的三个症状：**把"推进队列"和"执行任务"绑在同一根线程上**。
+
+### 13.2 单条命令的启动与收割
+
+启动（`Start(requestId)`）：
 
 ```
  1. results/<id>.json 存在        → 幂等跳过；归档命令、删除 claim、返回
@@ -422,15 +461,27 @@ Tick():
  5. 读取并解析失败                 → deadletter
  6. now > deadlineUtc             → results{rejected, stale} → 归档
  7. 无对应 (channel, action)       → results{rejected, unknown-action} → 归档
- 8. 独占创建 claims/<id>.json
- 9. 执行 handler（可取消）
-10. 原子写 results/<id>.json
-11. 归档命令、删除 claim、删除 progress
+ 8. 独占创建 claims/<id>.json，写 expiresAtUtc = now + CLAIM_WINDOW
+ 9. 把 (requestId, CTS, 起始时刻) 放进 in-flight 表，在线程池上启动 handler
 ```
 
-**MUST NOT 并发调用 `Tick`。** 两个线程同时 Tick 会同时看到"无 result、无 claim"，然后各写一次，破坏 claims 的独占语义。这条约束无法在运行时便宜地检测，只能写成规则并由实现文档声明。
+收割（`Reap()`，第 4 步）对每个已完成的 in-flight：
 
-**MUST 限制单次 Tick 的工作量**（`MAX_TICK_BATCH`，默认 16），避免积压时拖死宿主。
+```
+ 1. handler 正常返回              → results{ok, payload}
+ 2. handler 抛 OperationCanceled  → results{failed, cancelled}
+ 3. handler 抛其他异常            → results{failed, handler-error}
+ 4. 超过 HANDLER_TIMEOUT          → results{failed, handler-timeout}，尽力 Cancel
+ 5. 写 results → 归档命令 → 删 claim → 删 progress
+    （写 results 失败则止步，见下；其后各步的 I/O 失败 MUST NOT 中断其余步骤）
+```
+
+- 第 4 条 MUST 立即写终态，MUST NOT 等 handler 返回：一个不响应取消的 handler 可能永远不返回，等它等于让这条命令永远没有结果。
+- 写终态后若 handler 又返回了，其结果 MUST 被丢弃（终态已写，MUST NOT 覆盖）。
+- 收割路径 MUST 用 `try/catch` 包住每一步 I/O，MUST NOT 让一个 `IOException` 穿透 `Tick` 把整个服务循环打死。
+- 但**写 `results/` 失败是一个例外：此时 MUST NOT 归档命令、MUST NOT 删 claim**。命令留在 `commands/`、claim 留到租约到期，下一轮按 `attempts + 1` 重来。先归档再删 claim 会让这条命令连证据一起消失——那才是真正不可恢复的丢件（§1 不变式 3）。宁可重做一次，不可无凭据地丢掉。
+
+**HANDLER_TIMEOUT 的默认值是命令的剩余 deadline。** 也就是说，一条命令从投递到产出终态，最迟不超过它自己的 `deadlineUtc`——这与 §7.1 的语义一致：deadline 既是"最晚开始执行"，也是"最晚可以有结果"。实现 MAY 配置更短的 handler 时限。
 
 ---
 
@@ -454,11 +505,13 @@ Tick():
 
 ### 14.3 互调死锁（实现约束）
 
-长命宿主 MUST 使用非阻塞等待（异步/让出线程），MUST NOT 在驱动 `Tick` 的线程上同步阻塞等待另一个端点。
+**调用方**（`Call`/`CallAsync` 的使用者）MUST 使用非阻塞等待（异步/让出线程），MUST NOT 在驱动 `Tick` 的线程上同步阻塞等待另一个端点。同步阻塞只在没有 `Tick` 循环的短命进程（CLI）上安全。
 
-同步阻塞只在没有 `Tick` 循环的短命进程（CLI）上安全。
+**handler 内部 MUST NOT 同步等待另一个端点。** 这条规则把调用链深度限制为 1，从结构上排除 A→B→C→A 环。
 
-**handler 内部 MUST NOT 调用另一个端点。** 这条规则把调用链深度限制为 1，从结构上排除 A→B→C→A 环。
+§13.1 之后 `Tick` 本身不再被 handler 阻塞，所以这条规则的理由变了——但结论没变。现在的风险不是"Tick 停了"，而是**在途名额被等待中的 handler 占满**：`MAX_INFLIGHT`（默认 4）是个很小的数，四个 handler 各自阻塞等待另一个端点，这个端点就再也启动不了第五条命令。它不会死锁整个进程，但会让端点对外表现为"活着但什么都不做"——比崩溃更难诊断。
+
+异步 handler 在 `await` 另一个端点时同样占着名额，只是不占线程。需要长链路协作的宿主 MUST 自行调大 `MAX_INFLIGHT`，或者把协作拆成两次独立投递。
 
 ---
 
@@ -488,11 +541,15 @@ Tick():
 | `PROTOCOL_VERSION` | `1` | MUST NOT | 提升版本需要新文档 |
 | `HEARTBEAT_ALIVE` | 5 s | MAY | 必须 < `HEARTBEAT_DEAD` |
 | `HEARTBEAT_DEAD` | 15 s | MAY | |
-| `DEFAULT_DEADLINE` | 10 s | MAY | 按调用可覆盖 |
-| `CLAIM_WINDOW` | 30 s | MAY | MUST > 最长 handler 时限；MUST < 剩余 deadline |
+| `DEFAULT_DEADLINE` | 10 s | MAY | 按调用可覆盖（§7.1） |
+| `MAX_DEADLINE` | 300 s | MAY | 调用方给的 `deadline` 超过此值时截断 |
+| `CLAIM_WINDOW` | 10 s | MAY | 租约长度；MUST > `CLAIM_RENEW_INTERVAL` 的两倍 |
+| `CLAIM_RENEW_INTERVAL` | 2 s | MAY | 续约间隔；MUST < `CLAIM_WINDOW` |
+| `MAX_INFLIGHT` | 4 | MAY | ≥ 1；单个端点同时在跑的 handler 上限 |
+| `HANDLER_TIMEOUT` | 命令剩余 deadline | MAY | 超过即 `failed/handler-timeout` |
 | `MAX_ATTEMPTS` | 3 | MAY | ≥ 1 |
 | `MAX_COMMAND_FILE_BYTES` | 1 MiB + 4 KiB | MUST NOT | 超出即 deadletter |
-| `MAX_TICK_BATCH` | 16 | MAY | ≥ 1 |
+| `MAX_TICK_BATCH` | 16 | MAY | ≥ 1；单轮最多**启动**多少条 |
 | `MAX_COMMANDS_BACKPRESSURE` | 4096 | MAY | 投递方判定 |
 | `DEFAULT_TICK_INTERVAL` | 200 ms | MAY | 由宿主决定，协议不强制 |
 
@@ -532,6 +589,7 @@ Tick():
 **生命周期**
 - [ ] 每条命令最终产出 results 或 deadletter（§1 不变式 3）
 - [ ] claim 过期后先查 results 再重做（§8、§13）
+- [ ] 续约失败（租约被接管）时放弃执行且不写 `results/`（§8.1）
 - [ ] `attempts` 记在 claim 而非命令里（§8）
 - [ ] 超过 `deadlineUtc` 的命令不执行（§7.1）
 - [ ] 超限命令先看大小再读（§7.2）
@@ -543,6 +601,15 @@ Tick():
 - [ ] `unreachable` 不落盘（§9.2）
 - [ ] 只使用 §15 的原因码
 - [ ] `Tick` 不并发（§13）
+
+**并发模型**
+- [ ] `Tick` 不等 handler，慢 handler 期间心跳照常更新（§6、§13.1）
+- [ ] handler 收到 `CancellationToken`，取消能在 handler 执行期间送达（§11.1）
+- [ ] 在途 handler 续约 claim，租约不假过期（§8.1）
+- [ ] 在途数量受 `MAX_INFLIGHT` 限制（§13.1）
+- [ ] 超过 `HANDLER_TIMEOUT` 立即写 `failed/handler-timeout`，不等 handler 返回（§13.2）
+- [ ] 收割路径的 I/O 失败不穿透 `Tick`（§13.2）
+- [ ] 第一次 `Tick` 之后再注册能力被拒绝（§5）
 
 **互操作**
 - [ ] 与另一份实现双向对拍：命令、响应、死信、取消、进度格式完全一致

@@ -107,6 +107,17 @@ namespace Courier.E2E
                 node.Handle("document", "open", "打开文档", payload =>
                     "{\"opened\":true,\"payload\":" + Quote(payload) + "}");
                 node.Handle("demo", "echo", "回显 payload", payload => payload);
+                // SPEC §13.1 的活证据：这个 handler 会占住一个在途名额若干秒，
+                // 期间服务循环必须继续 Tick（心跳、取消、续约都靠它）。
+                node.Handle("demo", "slow", "慢任务：payload 是毫秒数", payload =>
+                {
+                    int milliseconds;
+                    if (!int.TryParse(payload, NumberStyles.Integer, CultureInfo.InvariantCulture, out milliseconds)) milliseconds = 0;
+                    if (milliseconds < 0) milliseconds = 0;
+                    if (milliseconds > 30000) milliseconds = 30000;
+                    Thread.Sleep(milliseconds);
+                    return "slept:" + milliseconds.ToString(CultureInfo.InvariantCulture);
+                });
 
                 // 父进程读这一行才知道可以开始 call；必须 flush，否则重定向到管道时会卡在缓冲区里。
                 Console.Out.Write("READY " + root + "\n");
@@ -145,6 +156,9 @@ namespace Courier.E2E
                 finally
                 {
                     Console.CancelKeyPress -= onCancel;
+                    // SPEC §13.1：Tick 只负责启动，退出前必须把在途 handler 跑完，
+                    // 否则最后一条命令的终态会留到下一次启动才补上。
+                    node.WaitForIdle(TimeSpan.FromSeconds(10));
                 }
             }
 

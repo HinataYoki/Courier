@@ -274,26 +274,28 @@ namespace Courier
     }
 
     /// <summary>
-    /// claims/ 下的独占标记（SPEC §8）。attempts 是重试计数的唯一存放处——命令文件 MUST NOT 被改写。
+    /// claims/ 下的租约（SPEC §8.1）。attempts 是重试计数的唯一存放处——命令文件 MUST NOT 被改写。
+    /// expiresAtUtc 是租约到期时刻，不是认领时刻：持有者在执行期间持续把它往后推，
+    /// 别的服务循环只在它过期之后才接管。
     /// </summary>
     internal sealed class CourierClaim
     {
         internal string Owner { get; private set; } = string.Empty;
-        internal DateTime ClaimedAtUtc { get; private set; }
+        internal DateTime ExpiresAtUtc { get; private set; }
         internal int Attempts { get; private set; }
 
         internal static CourierClaim? TryParse(string? text)
         {
             Dictionary<string, object?>? document;
             if (!CourierJson.TryParseObject(text, out document)) return null;
-            DateTime claimedAtUtc;
-            if (!CourierProtocol.TryParseUtc(CourierJson.GetString(document, "claimedAtUtc"), out claimedAtUtc)) return null;
+            DateTime expiresAtUtc;
+            if (!CourierProtocol.TryParseUtc(CourierJson.GetString(document, "expiresAtUtc"), out expiresAtUtc)) return null;
             long? attempts = CourierJson.GetInteger(document, "attempts");
             if (attempts == null || attempts.Value < 1 || attempts.Value > int.MaxValue) return null;
             return new CourierClaim
             {
                 Owner = CourierJson.GetString(document, "owner") ?? string.Empty,
-                ClaimedAtUtc = claimedAtUtc,
+                ExpiresAtUtc = expiresAtUtc,
                 Attempts = (int)attempts.Value
             };
         }
@@ -302,14 +304,20 @@ namespace Courier
         {
             return new CourierJsonObject()
                 .AddString("owner", Owner)
-                .AddString("claimedAtUtc", CourierProtocol.FormatUtc(ClaimedAtUtc))
+                .AddString("expiresAtUtc", CourierProtocol.FormatUtc(ExpiresAtUtc))
                 .AddNumber("attempts", Attempts)
                 .Build();
         }
 
-        internal static CourierClaim Create(string owner, DateTime claimedAtUtc, int attempts)
+        internal static CourierClaim Create(string owner, DateTime expiresAtUtc, int attempts)
         {
-            return new CourierClaim { Owner = owner, ClaimedAtUtc = claimedAtUtc, Attempts = attempts };
+            return new CourierClaim { Owner = owner, ExpiresAtUtc = expiresAtUtc, Attempts = attempts };
+        }
+
+        /// <summary>SPEC §8.1：把租约推到 now + ClaimWindow，保留 owner 与 attempts。</summary>
+        internal CourierClaim Renew(DateTime nowUtc)
+        {
+            return new CourierClaim { Owner = Owner, ExpiresAtUtc = nowUtc + CourierProtocol.ClaimWindow, Attempts = Attempts };
         }
     }
 

@@ -16,7 +16,7 @@ namespace Courier
         /// 原子写入一条命令。返回 null 表示已落盘；非 null 是本地合成的早期结果，此时一个字节都没写（SPEC §7.3、§9.2）。
         /// 标识符合法性由调用方先行校验，本方法只做协议层的前置检查。
         /// </summary>
-        internal static CourierResponse? Deliver(string rootDirectory, string issuedBy, string endpointId, string channel, string action, string? payload, out string requestId)
+        internal static CourierResponse? Deliver(string rootDirectory, string issuedBy, string endpointId, string channel, string action, string? payload, TimeSpan deadline, out string requestId)
         {
             requestId = string.Empty;
             string targetDirectory = Path.Combine(rootDirectory, CourierProtocol.EndpointsDirectory, endpointId);
@@ -43,7 +43,11 @@ namespace Courier
             // SPEC §7.2 的上限是**字节**：payload 长度按 UTF-16 码元算会让纯中文内容通过检查却写出三倍大小的文件。
             if (payload != null && Encoding.UTF8.GetByteCount(payload) > CourierProtocol.MaxCommandFileBytes) return Rejected(requestId, "payload exceeds the command file limit", CourierProtocol.ReasonInvalidCommand);
 
-            CourierCommand command = CourierCommand.Create(requestId, channel, action, payload ?? string.Empty, issuedBy, issuedAtUtc, issuedAtUtc + CourierProtocol.DefaultDeadline);
+            // SPEC §7.1：deadline 由调用方按次指定，超过 MAX_DEADLINE 时截断而不是报错——
+            // 一个误传的极大值不该让命令在盘上躺到下一次重启。
+            if (deadline > CourierProtocol.MaxDeadline) deadline = CourierProtocol.MaxDeadline;
+            if (deadline < TimeSpan.Zero) deadline = TimeSpan.Zero;
+            CourierCommand command = CourierCommand.Create(requestId, channel, action, payload ?? string.Empty, issuedBy, issuedAtUtc, issuedAtUtc + deadline);
             string commandJson = command.ToJson();
             // 序列化之后才准的检查：转义会放大长度，只看 payload 长度会漏判（SPEC §7.2）。
             if (Encoding.UTF8.GetByteCount(commandJson) > CourierProtocol.MaxCommandFileBytes) return Rejected(requestId, "payload exceeds the command file limit", CourierProtocol.ReasonInvalidCommand);

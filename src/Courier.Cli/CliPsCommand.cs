@@ -30,8 +30,8 @@ namespace Courier.Cli
                         .AddString("endpointId", claim.EndpointId)
                         .AddString("requestId", claim.RequestId)
                         .AddString("owner", claim.Claim.Owner)
-                        .AddString("claimedAtUtc", CourierProtocol.FormatUtc(claim.Claim.ClaimedAtUtc))
-                        .AddNumber("ageMs", CliDirectory.AgeMs(claim.Claim.ClaimedAtUtc, now))
+                        .AddString("expiresAtUtc", CourierProtocol.FormatUtc(claim.Claim.ExpiresAtUtc))
+                        .AddNumber("leaseRemainingMs", CliDirectory.LeaseRemainingMs(claim.Claim.ExpiresAtUtc, now))
                         .AddNumber("attempts", claim.Claim.Attempts)
                         .Build());
                 }
@@ -49,11 +49,13 @@ namespace Courier.Cli
             for (int index = 0; index < claims.Count; index++)
             {
                 CliClaimRecord claim = claims[index];
-                long age = CliDirectory.AgeMs(claim.Claim.ClaimedAtUtc, now);
+                long remaining = CliDirectory.LeaseRemainingMs(claim.Claim.ExpiresAtUtc, now);
+                // SPEC §8.1：claim 是租约。显示"还剩多久"比"认领了多久"更有用——
+                // 剩下为 0 就说明持有者已经失联，下一个 Tick 就会接管。
                 CliOutput.WriteLine(
                     claim.EndpointId + "  " + claim.RequestId
                     + "  owner=" + claim.Claim.Owner
-                    + "  claimed " + CliOutput.FormatSeconds(age) + " ago"
+                    + "  " + (remaining == 0 ? "lease expired" : "lease " + CliOutput.FormatSeconds(remaining) + " left")
                     + "  attempt " + claim.Claim.Attempts);
             }
 

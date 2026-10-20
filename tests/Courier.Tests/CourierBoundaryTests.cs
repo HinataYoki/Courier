@@ -24,7 +24,8 @@ public sealed class CourierBoundaryTests : TestRoot
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc", TimeSpan.FromSeconds(-30));
 
-        node.Tick();
+        // stale 判定发生在启动阶段，所以一轮 Tick 就够；这里仍走 WaitForIdle 以统一断言时机。
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         Assert.Equal(0, calls);
 
@@ -57,7 +58,7 @@ public sealed class CourierBoundaryTests : TestRoot
         // 故意绕过 CourierIO.WriteAtomic：这里要造的是"别家实现写坏的超限文件"。
         File.WriteAllText(CommandsPath("worker", requestId), new string('x', CourierProtocol.MaxCommandFileBytes + 1));
 
-        node.Tick();
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
 
         Assert.Equal(0, calls);
         Assert.Null(ReadResponse("worker", requestId));

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -63,8 +64,11 @@ public sealed class CourierNodeTests : TestRoot
     public void Handle_处理器为null_抛出ArgumentNullException()
     {
         using CourierNode node = OpenNode("worker");
-        Assert.Throws<ArgumentNullException>(() => node.Handle("document", "open", "打开文档", null!));
-        Assert.Throws<ArgumentNullException>(() => node.HandleAsync("document", "open", "打开文档", null!));
+        // 四个重载都接受 null 之外的 handler；显式转型是为了让编译器选中确定的那个重载。
+        Assert.Throws<ArgumentNullException>(() => node.Handle("document", "open", "打开文档", (Func<string, string>)null!));
+        Assert.Throws<ArgumentNullException>(() => node.Handle("document", "open", "打开文档", (Func<string, CancellationToken, string>)null!));
+        Assert.Throws<ArgumentNullException>(() => node.HandleAsync("document", "open", "打开文档", (Func<string, Task<string>>)null!));
+        Assert.Throws<ArgumentNullException>(() => node.HandleAsync("document", "open", "打开文档", (Func<string, CancellationToken, Task<string>>)null!));
     }
 
     /// <summary>SPEC §14：两端各自 Tick，调用方等待到 ok 响应。</summary>

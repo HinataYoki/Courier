@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Xunit;
 
@@ -228,15 +229,22 @@ public sealed class CourierEndpointsTests : TestRoot
         AssertArchivedCommand("worker", requestId);
     }
 
-    /// <summary>SPEC §13：单轮 Tick 最多处理 MAX_TICK_BATCH 条命令，剩下的留给下一轮。</summary>
+    /// <summary>
+    /// SPEC §13.1：单轮 Tick 启动的命令数同时受两个上限约束——MAX_INFLIGHT（在途名额）与
+    /// MAX_TICK_BATCH（单轮启动数）。名额满时 MUST 直接跳过，MUST NOT 阻塞等 handler。
+    /// </summary>
     [Fact]
-    public void Tick_命令超过批量上限_每轮最多处理16条()
+    public void Tick_命令数超过在途上限_单轮最多启动MAX_INFLIGHT条且不阻塞()
     {
         using CourierNode node = OpenNode("worker");
+
+        // 用闸门把 handler 卡住，这样在途名额会被真实占满，而不是跑完就释放。
+        using var gate = new ManualResetEventSlim(false);
         int calls = 0;
         node.Handle("document", "open", "打开文档", handlerPayload =>
         {
-            calls++;
+            Interlocked.Increment(ref calls);
+            gate.Wait(TimeSpan.FromSeconds(20));
             return "ok";
         });
 
@@ -246,17 +254,34 @@ public sealed class CourierEndpointsTests : TestRoot
             DeliverCommand("worker", "document", "open", "doc-" + index);
         }
 
+        // Tick 必须立刻返回：handler 还卡在闸门上，泵不能等它。
+        DateTime started = DateTime.UtcNow;
         node.Tick();
+        TimeSpan elapsed = DateTime.UtcNow - started;
+        Assert.True(elapsed < TimeSpan.FromSeconds(2), "Tick 被 handler 阻塞了 " + elapsed.TotalMilliseconds + " ms");
 
-        Assert.Equal(CourierProtocol.MaxTickBatch, calls);
-        Assert.Equal(CourierProtocol.MaxTickBatch, RequestIds(ResultsDirectory("worker")).Count);
-        Assert.Equal(total - CourierProtocol.MaxTickBatch, RequestIds(CommandsDirectory("worker")).Count);
+        // claim 是在 Tick 里同步写下的，所以它精确反映"本轮启动了几条"。
+        Assert.Equal(CourierProtocol.MaxInflight, RequestIds(ClaimsDirectory("worker")).Count);
+        Assert.Empty(RequestIds(ResultsDirectory("worker")));
+        Assert.Equal(total, RequestIds(CommandsDirectory("worker")).Count);
 
-        node.Tick();
+        // handler 在线程池上，计数要等它们真正跑起来（都已卡在闸门上，不会再增加）。
+        DateTime callDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (Volatile.Read(ref calls) < CourierProtocol.MaxInflight && DateTime.UtcNow < callDeadline)
+        {
+            Thread.Sleep(5);
+        }
+
+        Assert.Equal(CourierProtocol.MaxInflight, Volatile.Read(ref calls));
+
+        // 放行后所有命令都必须被处理完，一条都不能漏。
+        gate.Set();
+        node.WaitForIdle(TimeSpan.FromSeconds(20));
 
         Assert.Equal(total, calls);
         Assert.Equal(total, RequestIds(ResultsDirectory("worker")).Count);
         Assert.Empty(RequestIds(CommandsDirectory("worker")));
+        Assert.Empty(RequestIds(ClaimsDirectory("worker")));
     }
 
     /// <summary>SPEC §12.1：归档路径固定为 archive/&lt;yyyy-MM-dd&gt;/&lt;endpointId&gt;/commands/&lt;requestId&gt;.json，日期取处理时刻。</summary>
@@ -268,7 +293,7 @@ public sealed class CourierEndpointsTests : TestRoot
 
         string requestId = DeliverCommand("worker", "document", "open", "main.doc");
         DateTime before = DateTime.UtcNow;
-        node.Tick();
+        node.WaitForIdle(TimeSpan.FromSeconds(5));
         DateTime after = DateTime.UtcNow;
 
         string archived = AssertArchivedCommand("worker", requestId);
