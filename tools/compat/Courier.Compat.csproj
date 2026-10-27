@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    兼容性验证工程（不是产品代码，不被 src/ 引用）。
+
+    产品库的目标框架是 net10.0，但源码必须能作为一组文件直接拖进宿主工程。
+    宿主（Unity 等）的 API 兼容级别通常是 .NET Standard 2.1，所以这里用
+    netstandard2.1 + LangVersion 9.0 把同一批源文件再编一遍：任何只在新版 BCL
+    里出现的 API（File.Move 三参重载、OperatingSystem.IsWindows、Environment.ProcessId、
+    RandomNumberGenerator.Fill ...）都会在这里暴露成编译错误。
+
+    用法：dotnet build tools/compat/Courier.Compat.csproj -c Release
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AssemblyName>Courier.Compat</AssemblyName>
+    <RootNamespace>Courier</RootNamespace>
+    <NoWarn>CS8632</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\src\Courier\*.cs" Link="Courier\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

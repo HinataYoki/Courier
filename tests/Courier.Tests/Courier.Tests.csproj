@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Courier 的 xUnit 测试工程。目标框架、Nullable、ImplicitUsings 与产品工程保持一致，
+    这样测试里用的编译选项不会悄悄掩盖产品代码在宿主里的行为差异。
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>default</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AssemblyName>Courier.Tests</AssemblyName>
+    <RootNamespace>Courier.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <!--
+    只用本机 NuGet 缓存里已有的版本，保证离线可还原。
+    不要换成 xunit.v3：该包未缓存，restore 会直接失败。
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="coverlet.collector" Version="6.0.4">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!--
+    只引用 src/Courier，**不能**再加 src/Courier.Cli 的引用（两条路都实测走不通）：
+    CLI 的 AssemblyName 是 courier、产品是 Courier，Windows 大小写不敏感，同目录无法共存；
+    更要命的是引用了 CLI 之后 InternalsVisibleTo("Courier.Tests") 会失效，
+    本工程访问 CourierProtocol/CourierJson 等 internal 类型全部 CS0122，现有用例集体编译失败。
+    因此 CLI 覆盖面只能由独立的进程级 e2e 工程承担（起 courier.exe，靠 ExitCode + stdout 断言），
+    它需要额外定位 CLI 产物（约定 OutputPath 或环境变量），成本高于本阶段收益，暂未落地。
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Courier\Courier.csproj" />
+  </ItemGroup>
+
+</Project>

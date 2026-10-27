@@ -1,0 +1,66 @@
+using System;
+using System.Collections.Generic;
+
+namespace Courier.Cli
+{
+    /// <summary>
+    /// `courier ps`：列出所有端点 claims/ 里正在处理的请求（SPEC §10）。
+    /// <para>
+    /// 这条命令回答"现在卡在哪条命令上"，只读 claims/，不需要新字段、不需要端点配合。
+    /// </para>
+    /// </summary>
+    internal static class CliPsCommand
+    {
+        /// <summary>执行命令。</summary>
+        /// <param name="arguments">已解析的命令行。</param>
+        /// <param name="root">已解析的协议根目录。</param>
+        /// <param name="layout">root 下生效的目录布局。</param>
+        /// <returns>退出码。</returns>
+        internal static int Run(CliArguments arguments, string root, CourierLayout layout)
+        {
+            IReadOnlyList<CliClaimRecord> claims = CliDirectory.ReadClaims(root, layout);
+            DateTime now = DateTime.UtcNow;
+
+            if (arguments.Json)
+            {
+                var items = new List<string>(claims.Count);
+                for (int index = 0; index < claims.Count; index++)
+                {
+                    CliClaimRecord claim = claims[index];
+                    items.Add(new CourierJsonObject()
+                        .AddString("endpointId", claim.EndpointId)
+                        .AddString("requestId", claim.RequestId)
+                        .AddString("owner", claim.Claim.Owner)
+                        .AddString("expiresAtUtc", CourierProtocol.FormatUtc(claim.Claim.ExpiresAtUtc))
+                        .AddNumber("leaseRemainingMs", CliDirectory.LeaseRemainingMs(claim.Claim.ExpiresAtUtc, now))
+                        .AddNumber("attempts", claim.Claim.Attempts)
+                        .Build());
+                }
+
+                CliOutput.WriteLine(new CourierJsonObject().AddRaw("claims", CourierJson.Array(items)).Build());
+                return CliExitCode.OK;
+            }
+
+            if (claims.Count == 0)
+            {
+                Console.Error.Write("courier: no endpoint is currently processing a request\n");
+                return CliExitCode.OK;
+            }
+
+            for (int index = 0; index < claims.Count; index++)
+            {
+                CliClaimRecord claim = claims[index];
+                long remaining = CliDirectory.LeaseRemainingMs(claim.Claim.ExpiresAtUtc, now);
+                // SPEC §10.1：claim 是租约。显示"还剩多久"比"认领了多久"更有用——
+                // 剩下为 0 就说明持有者已经失联，下一个 Tick 就会接管。
+                CliOutput.WriteLine(
+                    claim.EndpointId + "  " + claim.RequestId
+                    + "  owner=" + claim.Claim.Owner
+                    + "  " + (remaining == 0 ? "lease expired" : "lease " + CliOutput.FormatSeconds(remaining) + " left")
+                    + "  attempt " + claim.Claim.Attempts);
+            }
+
+            return CliExitCode.OK;
+        }
+    }
+}
