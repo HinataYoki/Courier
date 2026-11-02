@@ -73,7 +73,7 @@ public sealed class CourierHotChannelTests : TestRoot
     /// <para>
     /// 非 Windows：热通道在本实现里不可用（命名节/事件/互斥体都是 Windows 专有），
     /// 此时 MUST 一个痕迹都不留。xunit 2.9.3 没有运行期跳过接口（<c>Assert.Skip</c> 是 v3 API，
-    /// 抛 <c>SkipException</c> 在 v2 runner 里会被报成 FAIL），所以这一分支用"平台确实不支持"
+    /// 抛 <c>SkipException</c> 在 test runner 里会被报成 FAIL），所以这一分支用"平台确实不支持"
     /// 与"确实没留痕迹"两条真断言收尾，而不是裸 return 让用例空转通过。
     /// </para>
     /// </summary>

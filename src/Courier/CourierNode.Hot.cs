@@ -95,7 +95,7 @@ namespace Courier
             mHotJournal = OpenHotJournal();
 
             // 会合信息写进实现私有目录 endpoints/<id>/hot/descriptor.json，绝不写进 endpoint.json：
-            // SPEC §5.2 规定 v2 的 endpoint.json 里 hot 字段 MUST NOT 出现，而 §2 明确允许实现私有文件。
+            // SPEC §5.2 规定 endpoint.json 里 hot 字段 MUST NOT 出现，而 §2 明确允许实现私有文件。
             // 写不出来就当作没有热通道（对端退回文件协议），不影响本端点服务。
             CourierHotDescriptor? descriptor = HotDescriptorOrNull();
             if (descriptor == null || !descriptor.TryWrite(mEndpointDirectory, mLayout))

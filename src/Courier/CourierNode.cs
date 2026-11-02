@@ -231,6 +231,7 @@ namespace Courier
 
             // 先停泵：泵与下面的 ReapInflight 都会走 Finish，两者同时跑就是并发执行服务步骤（SPEC §16.1）。
             // 热通道在 Dispose 期间退场，正在内存里等的那一方会看到对端已死，退回文件轮询。
+            DisposeStreams();
             StopHotChannel();
 
             CancelInflightForShutdown();

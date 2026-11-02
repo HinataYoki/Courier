@@ -11,6 +11,7 @@
 ---
 
 Courier 是一套**用文件系统当信道的本地进程间调用协议**，外加一份开箱即用的 C# 实现和一个 `courier` 命令行工具。
+控制面保持文件协议；需要每帧或高频只读观察时，可额外使用实现私有的 `CourierStream` 数据面。
 
 一端把请求写成文件，另一端按周期扫描、执行、把结果写回同一个目录。没有端口、没有 socket、没有常驻服务端、没有防火墙弹窗。任意一端崩溃重启，未完成的消息仍然在磁盘上。
 
@@ -23,7 +24,7 @@ courier call  ──command.json──▶  endpoints/app-a/commands/  ──▶ 
 
 | 适合 | 不适合 |
 |---|---|
-| 桌面软件 / 编辑器插件 / 本地 Agent 之间的控制面调用 | 高频数据面（音视频、每帧同步、大块二进制） |
+| 桌面软件 / 编辑器插件 / 本地 Agent 之间的控制面调用 | 需要跨机器的高频数据面 |
 | 需要「调用历史可离线取证」的自动化 | 跨机器通信（把目录挂成共享盘即可，协议本身不做网络） |
 | 被调用方是 GUI 进程，不方便长连接或开端口 | 需要 exactly-once 副作用的场景（投递是至少一次） |
 
@@ -37,6 +38,7 @@ courier call  ──command.json──▶  endpoints/app-a/commands/  ──▶ 
 - [工作原理](#工作原理)
 - [命令](#命令)
 - [嵌入到你的软件](#嵌入到你的软件)
+- [高频只读数据面](#高频只读数据面)
 - [目录与配置](#目录与配置)
 - [退出码与错误](#退出码与错误)
 - [常见问题](#常见问题)
@@ -253,6 +255,41 @@ new CourierNodeOptions
 
 ---
 
+## 高频只读数据面
+
+控制命令仍走文件协议。若宿主需要持续输出帧、日志或采样，可以用 `CourierStream`
+避免逐条写文件：
+
+```csharp
+using Courier;
+
+using CourierNode node = CourierNode.Open(".courier", "my-editor");
+using CourierStreamWriter writer = node.OpenStream(
+    "trace",
+    new CourierStreamOptions { Capacity = 4096, MaxRecordBytes = 16 * 1024 });
+
+writer.TryWrite(Encoding.UTF8.GetBytes("{\"kind\":\"frame\",\"frame\":42}"));
+```
+
+```csharp
+using CourierStreamReader reader =
+    CourierStreamReader.Open(".courier", "my-editor", "trace", sinceSequence: 0);
+
+while (reader.TryRead(1000, out CourierStreamRecord record))
+{
+    Console.WriteLine(record.Sequence + ": " + Encoding.UTF8.GetString(record.Payload));
+}
+```
+
+- Windows 默认使用命名共享内存环 `mmap-ring`，创建失败自动回退 Unix Domain Socket。
+- Linux/macOS 使用 Unix Domain Socket。
+- 环满丢最旧记录，写入方永不阻塞；记录带序号、UTC ticks 与 CRC32。
+- 不写 `commands/` / `results/`，也不改变 `endpoint.json`；描述只出现在
+  `endpoints/<id>/streams/<name>/descriptor.json`。
+- 这是可丢弃的观察数据面，不替代命令可靠性。完整契约见 [docs/STREAM.md](docs/STREAM.md)。
+
+---
+
 ## 目录与配置
 
 **root 怎么找**：`--root PATH` 直接指定；否则从当前目录向上找名为 `.courier` 的目录（`--root-name` 或环境变量 `COURIER_ROOT_NAME` 可换名字）。所以只要在一个 root 的任意子目录里，命令都能用。
@@ -336,11 +373,15 @@ new CourierNodeOptions
 |---|---|
 | 文件：临时文件 + rename + 轮询 + delete | 1243 µs |
 | 命名管道 / Unix domain socket | 8.9 µs |
-| 文件映射环形缓冲（同进程空转） | 1.3 µs |
+| 命名共享内存环（同进程空转） | 1.3 µs |
 
 `courier call` 的端到端耗时主要在进程启动上：本机 15 次采样 `durationMs` 中位约 50 ms（含起 CLI 进程、投递、等待、读结果）。**所以它面向控制面：命令、查询、任务投递，不是数据面。**
 
 如果确实需要更低的单次延迟，实现里有一条可选的同机内存「叫醒」旁路：命令仍然先落盘、终态仍然写 `results/`，旁路只负责把对方从轮询里叫醒，失败就自动退回文件通道。它不改变任何可观察行为，Windows 之外不生效，也可以用 `EnableHotChannel = false` 关掉。
+
+若需求是持续读取运行数据而不是降低单条命令延迟，使用 `CourierStream`：Windows 走 `mmap-ring`，
+Linux/macOS 走 Unix Domain Socket。它和命令热通道是两个独立实现，前者可跨平台承载高频观察数据，
+后者只优化 Windows 上的命令往返。
 
 ---
 

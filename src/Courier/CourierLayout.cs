@@ -12,7 +12,7 @@ namespace Courier
     /// <list type="number">
     /// <item>调用方直接传入的实例（<c>CourierNode.Open(root, endpointId, description, layout)</c>）。</item>
     /// <item>根目录下的 <c>courier.layout.json</c>（见 <see cref="Load"/>）。</item>
-    /// <item><see cref="Default"/>：与 v2 协议逐字节相同的默认名字。</item>
+    /// <item><see cref="Default"/>：与现有协议逐字节相同的默认名字。</item>
     /// </list>
     /// </para>
     /// <para>
@@ -44,13 +44,13 @@ namespace Courier
         private string mEndpointFileName = CourierProtocol.ENDPOINT_FILE_NAME;
         private string mHeartbeatFileName = CourierProtocol.HEARTBEAT_FILE_NAME;
 
-        /// <summary>创建一个与 v2 协议完全一致的默认布局。</summary>
+        /// <summary>创建一个与现有协议完全一致的默认布局。</summary>
         public CourierLayout()
         {
         }
 
         /// <summary>
-        /// 默认布局：与 v2 协议逐字节相同的名字。
+        /// 默认布局：与现有协议逐字节相同的名字。
         /// <para>
         /// 每次返回新实例，而不是共享一个可变单例 —— 否则任何一处 <c>Default.CommandsDirectory = ...</c>
         /// 都会悄悄改掉全进程的默认值，这类 bug 极难定位。

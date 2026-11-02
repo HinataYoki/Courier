@@ -8,7 +8,7 @@ namespace Courier
     /// 热通道的会合描述：告诉潜在调用方"这个端点还有一条内存通道，叫什么名字、宿主是谁"。
     /// <para>
     /// 它写在 <c>endpoints/&lt;id&gt;/hot/descriptor.json</c> —— SPEC §2 的「实现私有文件与目录」。
-    /// **MUST NOT 写进 <c>endpoint.json</c>**：SPEC §5.2 规定 v2 的 <c>hot</c> 字段 MUST NOT 出现。
+    /// **MUST NOT 写进 <c>endpoint.json</c>**：SPEC §5.2 规定 <c>hot</c> 字段 MUST NOT 出现。
     /// 换个实现读这个目录，读不出任何协议语义，所以它是实现私有的性能旁路，不是协议层快通道。
     /// </para>
     /// <para>
