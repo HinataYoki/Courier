@@ -15,10 +15,11 @@ namespace Courier
     {
         private const int READ_RETRIES = 4;
         private const int READ_SPIN_WAIT = 32;
+        private const int EVENT_POLL_MS = 1;
 
         private readonly MemoryMappedFile mFile;
         private readonly MemoryMappedViewAccessor mView;
-        private readonly EventWaitHandle mDataAvailable;
+        private readonly EventWaitHandle? mDataAvailable;
         private readonly int mCapacity;
         private readonly int mMaxRecordBytes;
         private readonly int mStride;
@@ -29,7 +30,7 @@ namespace Courier
         private CourierStreamMmapSource(
             MemoryMappedFile file,
             MemoryMappedViewAccessor view,
-            EventWaitHandle dataAvailable,
+            EventWaitHandle? dataAvailable,
             int capacity,
             int maxRecordBytes,
             int stride,
@@ -95,7 +96,8 @@ namespace Courier
             EventWaitHandle? dataAvailable = null;
             try
             {
-                file = MemoryMappedFile.OpenExisting(descriptor.MapName);
+                // Unity/Mono 创建的映射可能只授予只读权限；读取端不应请求读写句柄。
+                file = MemoryMappedFile.OpenExisting(descriptor.MapName, MemoryMappedFileRights.Read);
                 view = file.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
                 if (view.Capacity < CourierStreamMmapProtocol.HEADER_BYTES)
                 {
@@ -124,7 +126,7 @@ namespace Courier
                 long oldest = view.ReadInt64(CourierStreamMmapProtocol.OFF_OLDEST);
                 long next = view.ReadInt64(CourierStreamMmapProtocol.OFF_HEAD);
                 long dropped = view.ReadInt64(CourierStreamMmapProtocol.OFF_DROPPED);
-                dataAvailable = EventWaitHandle.OpenExisting(descriptor.DataEventName);
+                dataAvailable = TryOpenDataEvent(descriptor.DataEventName);
                 if (oldest <= 0 || next < oldest) throw new InvalidDataException("courier mmap-ring bounds are invalid");
 
                 long start = sinceSequence <= 0 ? oldest : sinceSequence;
@@ -196,6 +198,15 @@ namespace Courier
                     waitMs = (int)Math.Ceiling(remaining);
                 }
 
+                if (mDataAvailable == null)
+                {
+                    // 命名事件在跨运行时场景可能因 ACL 打不开；共享内存头部仍是唯一事实源，
+                    // 这里退化为短轮询，保证读取端不依赖事件也能追赶记录。
+                    if (waitMs == 0) return false;
+                    Thread.Sleep(waitMs < 0 ? EVENT_POLL_MS : Math.Min(waitMs, EVENT_POLL_MS));
+                    continue;
+                }
+
                 try
                 {
                     if (!mDataAvailable.WaitOne(waitMs)) return false;
@@ -212,7 +223,7 @@ namespace Courier
         {
             if (mDisposed) return;
             mDisposed = true;
-            try { mDataAvailable.Dispose(); }
+            try { mDataAvailable?.Dispose(); }
             catch (ObjectDisposedException) { }
             mView.Dispose();
             mFile.Dispose();
@@ -321,6 +332,31 @@ namespace Courier
                 }
 
                 Thread.Sleep(1);
+            }
+        }
+
+        /// <summary>
+        /// 尝试打开数据门铃；事件不可用时不阻断读取，调用方改为轮询共享内存头部。
+        /// </summary>
+        /// <param name="eventName">门铃对象名。</param>
+        /// <returns>可等待时返回事件；权限或对象不可用时返回 null。</returns>
+        private static EventWaitHandle? TryOpenDataEvent(string? eventName)
+        {
+            if (string.IsNullOrEmpty(eventName))
+            {
+                return null;
+            }
+
+            try
+            {
+                return EventWaitHandle.OpenExisting(eventName);
+            }
+            catch (Exception caught) when (
+                caught is IOException ||
+                caught is UnauthorizedAccessException ||
+                caught is WaitHandleCannotBeOpenedException)
+            {
+                return null;
             }
         }
     }
